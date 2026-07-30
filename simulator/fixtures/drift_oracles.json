@@ -1,0 +1,67 @@
+{
+  "scenarios": {
+    "f11-pool-migrated": {
+      "action_seconds": 90,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "pool_multiplexing_enabled",
+            "value": true
+          }
+        }
+      ]
+    },
+    "f12-cache-managed": {
+      "action_seconds": 90,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "storefront-cache",
+            "to_service": "cache-managed-primary"
+          }
+        }
+      ]
+    }
+  },
+  "families": {
+    "F11_POOL_DRIVER_MIGRATION": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "db_pool_size",
+            "value": 80
+          }
+        },
+        {
+          "action_type": "restart_service",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    },
+    "F12_CACHE_TOPOLOGY_MIGRATION": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "storefront-cache",
+            "to_service": "cache-onprem-replica"
+          }
+        }
+      ]
+    }
+  }
+}

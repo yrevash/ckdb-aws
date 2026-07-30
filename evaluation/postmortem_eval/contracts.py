@@ -34,3 +34,27 @@ class Responder(Protocol):
 
     def decide(self, observation: IncidentObservation) -> ResponderDecision:
         """Return an ordered remediation plan from agent-visible state only."""
+
+
+@dataclass(frozen=True)
+class TemporalValidityRecord:
+    """One temporal-drift incident's outcome: did the memory arm apply the
+    fix that is actually valid at the incident's decision time, or a fix
+    that has since been superseded by an environment change?
+
+    ``expected_memory_id`` is derived purely from each candidate memory's
+    ``valid_from``/``valid_to`` window evaluated at ``observed_at`` -- never
+    from the responder's own choice -- so this record is an independent
+    check, not a restatement of what the responder did.
+    """
+
+    scenario_id: str
+    family_id: str
+    variant_id: str
+    observed_at: str | None
+    authorized_memory_id: str | None
+    expected_memory_id: str | None
+    applied_currently_valid_fix: bool
+    applied_stale_fact: bool
+    resolved: bool
+    mttr_seconds: int | None

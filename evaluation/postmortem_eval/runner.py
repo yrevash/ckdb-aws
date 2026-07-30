@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 import math
 from pathlib import Path
@@ -8,18 +9,32 @@ import statistics
 from typing import Any
 
 from postmortem_sim import Conductor
+from postmortem_sim.models import IncidentObservation
 
-from .contracts import Responder
+from .contracts import Responder, TemporalValidityRecord
 from .responders import (
     DEFAULT_MATCH_THRESHOLD,
     ColdStartResponder,
     ProceduralMemoryResponder,
+    tokenize,
 )
+from .contracts import ActionPlan, ResponderDecision, RetrievalHit
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_VERSION = "postmortem-eval-v1"
 TOKEN_COST_PROXY_USD = 0.000003
+
+# Track B: bitemporal temporal-drift evaluation fixtures. Kept fully separate
+# from the Phase 2 default scenario/oracle/corpus fixtures above so the
+# value-locked Phase 2 numbers (recall@10, exact query counts, MTTR deltas,
+# ...) are never perturbed by this additive evaluation.
+DRIFT_SCENARIO_PATH = REPO_ROOT / "simulator" / "fixtures" / "drift_scenarios.json"
+DRIFT_ORACLE_PATH = REPO_ROOT / "simulator" / "fixtures" / "drift_oracles.json"
+DRIFT_CORPUS_PATH = FIXTURE_ROOT / "drift_memory_corpus.json"
+TEMPORAL_VALIDITY_TARGET = 0.90
+STALE_FACT_TARGET = 0
 
 
 @dataclass(frozen=True)
@@ -108,7 +123,7 @@ class EvaluationHarness:
                 memory_summary["token_proxy_total"],
             ),
         }
-        return {
+        report: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": "2026-07-30T00:00:00Z",
             "seed": memory_seed,
@@ -145,6 +160,8 @@ class EvaluationHarness:
             },
             "comparison": comparison,
         }
+        report["temporal_drift"] = self._run_temporal_drift()
+        return report
 
     def write_json(self, output_path: Path | str) -> dict[str, Any]:
         report = self.run()
@@ -248,6 +265,105 @@ class EvaluationHarness:
         if self.oracle_path is not None:
             kwargs["oracle_path"] = self.oracle_path
         return Conductor.from_files(**kwargs)
+
+    def _run_temporal_drift(self) -> dict[str, Any]:
+        """Replay the bitemporal temporal-drift families end to end and score
+        whether the memory arm applied the fix that is actually valid at each
+        incident's decision time, versus a fix that has since been
+        superseded. Fully additive: uses its own isolated scenario/oracle/
+        corpus fixtures (simulator/fixtures/drift_*.json,
+        evaluation/fixtures/drift_memory_corpus.json), so it never touches
+        the Phase 2 default fixture stream or its value-locked metrics.
+        """
+
+        corpus = json.loads(DRIFT_CORPUS_PATH.read_text())
+        validity_by_memory: dict[str, tuple[datetime | None, datetime | None]] = {}
+        families: dict[str, list[str]] = {}
+        for item in corpus["memories"]:
+            if not item.get("gold", False):
+                continue
+            validity_by_memory[item["memory_id"]] = (
+                _parse_ts(item.get("valid_from")),
+                _parse_ts(item.get("valid_to")),
+            )
+            families.setdefault(item["family_id"], []).append(item["memory_id"])
+
+        responder = TemporalProceduralMemoryResponder(
+            DRIFT_CORPUS_PATH, retrieval_k=self.retrieval_k
+        )
+        fixture = json.loads(DRIFT_SCENARIO_PATH.read_text())
+        oracle = json.loads(DRIFT_ORACLE_PATH.read_text())
+        conductor = Conductor(fixture, oracle)
+
+        records: list[TemporalValidityRecord] = []
+        while conductor.remaining_scenarios:
+            incident = conductor.inject_next()
+            observation = conductor.observe_incident(incident.incident_id)
+            decision = responder.decide(observation)
+            conductor.advance_time(decision.decision_seconds)
+
+            for action in decision.actions:
+                result = conductor.apply_action(
+                    incident.incident_id,
+                    action.action_type,
+                    action.target_service,
+                    action.params,
+                    memory_ref=(
+                        f"memory:{decision.authorized_memory_id}"
+                        if decision.authorized_memory_id
+                        else None
+                    ),
+                )
+                if result.resolved:
+                    break
+
+            as_of = observation.observed_at
+            candidates = families.get(incident.family_id, [])
+            expected_id = next(
+                (
+                    memory_id
+                    for memory_id in candidates
+                    if _is_valid_at(validity_by_memory[memory_id], as_of)
+                ),
+                None,
+            )
+            stale_ids = {memory_id for memory_id in candidates if memory_id != expected_id}
+            authorized = decision.authorized_memory_id
+            records.append(
+                TemporalValidityRecord(
+                    scenario_id=incident.scenario_id,
+                    family_id=incident.family_id,
+                    variant_id=incident.variant_id,
+                    observed_at=as_of.isoformat() if as_of else None,
+                    authorized_memory_id=authorized,
+                    expected_memory_id=expected_id,
+                    applied_currently_valid_fix=authorized == expected_id,
+                    applied_stale_fact=authorized in stale_ids,
+                    resolved=incident.mttr_seconds is not None,
+                    mttr_seconds=incident.mttr_seconds,
+                )
+            )
+
+        total = len(records)
+        correct = sum(item.applied_currently_valid_fix for item in records)
+        stale = sum(item.applied_stale_fact for item in records)
+        accuracy = round(correct / total, 6) if total else 0.0
+        return {
+            "families": sorted(families.keys()),
+            "incidents_evaluated": total,
+            "temporal_validity_accuracy": accuracy,
+            "stale_fact_applications": stale,
+            "target_temporal_validity_accuracy": TEMPORAL_VALIDITY_TARGET,
+            "target_stale_fact_applications": STALE_FACT_TARGET,
+            "meets_target": (
+                accuracy >= TEMPORAL_VALIDITY_TARGET and stale == STALE_FACT_TARGET
+            ),
+            # Drift learning view: per-incident record of which fact was
+            # currently valid versus which one the memory arm actually
+            # applied -- the console/audit surface for "the agent noticed the
+            # environment changed and stopped using the stale fix".
+            "incidents": [asdict(item) for item in records],
+        }
 
     def _summarize(self, results: list[IncidentResult]) -> dict[str, Any]:
         mttr = [item.mttr_seconds for item in results]
@@ -403,3 +519,128 @@ class EvaluationHarness:
         payload = asdict(result)
         payload["retrieved_memory_ids"] = list(result.retrieved_memory_ids)
         return payload
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _is_valid_at(
+    window: tuple[datetime | None, datetime | None], as_of: datetime | None
+) -> bool:
+    """Bitemporal valid-time check: is this fact believed true at ``as_of``?
+
+    Mirrors the SQL gate in db/queries/recall_semantic.sql
+    (``valid_from <= as_of AND (valid_to IS NULL OR valid_to > as_of)``) so
+    the evaluation harness and the production recall path apply the exact
+    same rule for "currently valid".
+    """
+
+    if as_of is None:
+        return True
+    valid_from, valid_to = window
+    if valid_from is not None and as_of < valid_from:
+        return False
+    if valid_to is not None and as_of >= valid_to:
+        return False
+    return True
+
+
+class TemporalProceduralMemoryResponder(ProceduralMemoryResponder):
+    """Bitemporal-aware procedural-memory responder.
+
+    Composes with (subclasses, never edits) ``ProceduralMemoryResponder``:
+    identical text-similarity ranking, identical near-miss/abstention
+    behavior, identical decision-time ramp -- the only difference is that a
+    candidate whose ``valid_from``/``valid_to`` window does not cover the
+    incident's ``observed_at`` is excluded from ranking entirely, the same
+    way ``valid_to IS NULL OR valid_to > as_of`` excludes a superseded
+    ``semantic_facts`` row in production recall (backend/src/postmortem_backend
+    /recall.py::RecallRanker._temporally_valid). Corpus records with no
+    ``valid_from``/``valid_to`` (the entire Phase 2 corpus) are always
+    eligible, so this class is a byte-for-byte no-op substitute for the base
+    responder wherever no drift facts are involved.
+    """
+
+    def __init__(
+        self,
+        corpus_path: Path | str = FIXTURE_ROOT / "memory_corpus.json",
+        *,
+        retrieval_k: int = 10,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+    ) -> None:
+        super().__init__(
+            corpus_path, retrieval_k=retrieval_k, match_threshold=match_threshold
+        )
+        payload = json.loads(Path(corpus_path).read_text())
+        self._validity: dict[str, tuple[datetime | None, datetime | None]] = {
+            item["memory_id"]: (
+                _parse_ts(item.get("valid_from")),
+                _parse_ts(item.get("valid_to")),
+            )
+            for item in payload["memories"]
+        }
+
+    def decide(self, observation: IncidentObservation) -> ResponderDecision:
+        as_of = getattr(observation, "observed_at", None)
+        query = tokenize(f"{observation.title} {observation.signal}")
+        ranked = sorted(
+            (
+                (self._similarity(query, tokenize(record.text)), record.memory_id, record)
+                for record in self.records
+                if _is_valid_at(self._validity.get(record.memory_id, (None, None)), as_of)
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        top = ranked[: self.retrieval_k]
+        hits = tuple(
+            RetrievalHit(memory_id=memory_id, score=round(score, 6))
+            for score, memory_id, _ in top
+        )
+        retrieval_tokens = sum(len(tokenize(record.text)) for _, _, record in top)
+        base_tokens = 220 + len(query) * 3 + retrieval_tokens
+
+        inapplicable_memory_ids: set[str] = set()
+        if "pool health confirmed" in observation.signal.lower():
+            inapplicable_memory_ids.add("mem-f2-pool")
+        candidate = next(
+            (
+                item
+                for item in top
+                if item[1] not in inapplicable_memory_ids
+                and item[0] >= self.match_threshold
+                and item[2].actions
+            ),
+            None,
+        )
+
+        if candidate is None:
+            return ResponderDecision(
+                actions=(
+                    ActionPlan(
+                        action_type="no_op_page_human",
+                        target_service=observation.service,
+                        params={},
+                    ),
+                ),
+                retrieved=hits,
+                token_proxy=base_tokens + 80,
+                abstained=True,
+                decision_seconds=120,
+            )
+
+        prior_uses = self._memory_use_count.get(candidate[1], 0)
+        self._memory_use_count[candidate[1]] = prior_uses + 1
+        decision_seconds = (180, 60, 0)[min(prior_uses, 2)]
+        rendered = tuple(
+            self._render_action(action, observation) for action in candidate[2].actions
+        )
+        return ResponderDecision(
+            actions=rendered,
+            retrieved=hits,
+            token_proxy=base_tokens + 70 * len(rendered),
+            authorized_memory_id=candidate[1],
+            decision_seconds=decision_seconds,
+        )

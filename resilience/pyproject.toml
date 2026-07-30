@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "postmortem-resilience"
+version = "0.1.0"
+description = "Phase 3 Track A: RPO/RTO/atomicity/freshness measurement harness for the local simulated multi-region CockroachDB cluster"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+live = [
+  "psycopg[binary]>=3.2,<4",
+]
+dev = [
+  "pytest>=8.4,<9",
+  "pyyaml>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["postmortem_resilience*"]

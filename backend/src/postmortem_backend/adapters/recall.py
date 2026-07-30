@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
-from datetime import datetime
+from datetime import UTC, datetime
+from time import sleep
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ..domain import MemoryCandidate, MemoryKind, RecallBundle, RecallQuery
 from ..errors import RecallError
@@ -52,7 +53,7 @@ SEMANTIC_RECALL_SQL = """
 WITH nearest AS (
     SELECT
         fact_id, org_id, agent_id, subject, predicate, object, confidence,
-        source, valid_from, valid_to, recorded_at,
+        source, valid_from, valid_to, recorded_at, superseded_by,
         1 - (embedding <=> %(embedding)s::VECTOR(1024)) AS similarity
     FROM semantic_facts
     WHERE org_id = %(org_id)s
@@ -75,7 +76,22 @@ SELECT
           AND fact_id = nearest.fact_id
           AND episodic_event_id IS NOT NULL
           AND role IN ('source', 'reinforcement')
-    ), ARRAY[]::UUID[]) AS provenance_ids
+    ), ARRAY[]::UUID[]) AS provenance_ids,
+    (
+        SELECT jsonb_build_object(
+            'fact_id', predecessor.fact_id,
+            'object', predecessor.object,
+            'confidence', predecessor.confidence,
+            'valid_from', predecessor.valid_from,
+            'valid_to', predecessor.valid_to,
+            'recorded_at', predecessor.recorded_at,
+            'source', predecessor.source
+        )
+        FROM semantic_facts AS predecessor
+        WHERE predecessor.org_id = nearest.org_id
+          AND predecessor.superseded_by = nearest.fact_id
+        LIMIT 1
+    ) AS predecessor
 FROM nearest
 WHERE nearest.subject LIKE 'org:%%'
    OR nearest.subject IN (
@@ -87,6 +103,61 @@ WHERE nearest.subject LIKE 'org:%%'
        FROM services
        WHERE org_id = %(org_id)s AND service_id = %(service_id)s
    )
+"""
+
+
+# Bitemporal transition: close the currently-valid fact (if any) and open the
+# new one -- a fact is never overwritten in place. Mirrors
+# research/postmortem/01-memory-architecture.md section 2, with one
+# deliberate correction proven against a live cluster: that doc's sketch
+# closes the old row and inserts the new row as a single multi-CTE
+# statement, but CockroachDB rejects mixing an UPDATE and an INSERT against
+# the *same* table in one statement by default
+# (sql.multiple_modifications_of_table.enabled=false, "to prevent data
+# corruption") -- and turning that guard off cluster-wide is not a trade this
+# track makes for one query. So the transition is two statements in one
+# explicit, client-retried transaction instead of one implicit
+# server-retried statement: still fully atomic (both commit or neither
+# does), just not single-round-trip. The insert runs first specifically so
+# the FK on superseded_by (checked per-statement, not deferred) has a row to
+# point at when the close/supersede update runs second.
+INSERT_TRANSITIONED_FACT_SQL = """
+INSERT INTO semantic_facts (
+    fact_id, org_id, agent_id, subject, predicate, object, confidence,
+    source, embedding, valid_from
+)
+VALUES (
+    %(new_fact_id)s, %(org_id)s, %(agent_id)s, %(subject)s, %(predicate)s,
+    %(object)s::JSONB, %(confidence)s, %(source)s,
+    %(embedding)s::VECTOR(1024), %(transition_at)s
+)
+RETURNING fact_id, valid_from, recorded_at
+"""
+
+CLOSE_SUPERSEDED_FACT_SQL = """
+UPDATE semantic_facts
+SET valid_to = %(transition_at)s, superseded_by = %(new_fact_id)s
+WHERE org_id = %(org_id)s
+  AND subject = %(subject)s
+  AND predicate = %(predicate)s
+  AND valid_to IS NULL
+  AND fact_id != %(new_fact_id)s
+RETURNING fact_id
+"""
+
+
+# Full belief history for a single (subject, predicate), oldest first --
+# powers the "why did the agent think X" audit/explainability view. Served by
+# the semantic_facts_history covering index added in 0006_bitemporal_transitions.sql.
+FACT_HISTORY_SQL = """
+SELECT
+    fact_id, object, confidence, source,
+    valid_from, valid_to, recorded_at, superseded_by
+FROM semantic_facts
+WHERE org_id = %(org_id)s
+  AND subject = %(subject)s
+  AND predicate = %(predicate)s
+ORDER BY recorded_at ASC
 """
 
 
@@ -132,6 +203,30 @@ FROM nearest
 """
 
 
+@dataclass(frozen=True, slots=True)
+class FactTransitionResult:
+    """Outcome of the atomic bitemporal transition -- close old, open new."""
+
+    new_fact_id: UUID
+    valid_from: datetime
+    recorded_at: datetime
+    superseded_fact_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class FactHistoryEntry:
+    """One row of a subject/predicate's full belief history, oldest first."""
+
+    fact_id: UUID
+    object: Any
+    confidence: float
+    source: str | None
+    valid_from: datetime
+    valid_to: datetime | None
+    recorded_at: datetime
+    superseded_by: UUID | None
+
+
 class CockroachRecallAdapter:
     """Leaseholder-read recall with application-side safety gates and reranking."""
 
@@ -143,6 +238,110 @@ class CockroachRecallAdapter:
     ) -> None:
         self._connection_provider = connection_provider
         self._ranker = RecallRanker(policy)
+
+    def transition_fact(
+        self,
+        *,
+        org_id: UUID,
+        agent_id: UUID,
+        subject: str,
+        predicate: str,
+        object_value: Any,
+        embedding: tuple[float, ...],
+        confidence: float = 1.0,
+        source: str | None = None,
+        transition_at: datetime | None = None,
+        max_serialization_retries: int = 3,
+    ) -> FactTransitionResult:
+        """Close the currently-valid fact (if any) and open the replacement,
+        atomically -- never an in-place overwrite. Two statements
+        (INSERT_TRANSITIONED_FACT_SQL, CLOSE_SUPERSEDED_FACT_SQL) inside one
+        explicit transaction: both commit or neither does. Retries the whole
+        transaction on 40001, never a single statement within it, per
+        CockroachDB's serializable-retry contract.
+        """
+
+        if len(embedding) != 1024:
+            raise RecallError("Fact embedding must have exactly 1024 dimensions.")
+        params = {
+            "new_fact_id": uuid4(),
+            "org_id": org_id,
+            "agent_id": agent_id,
+            "subject": subject,
+            "predicate": predicate,
+            "object": json.dumps(object_value),
+            "confidence": confidence,
+            "source": source,
+            "embedding": _vector_literal(embedding),
+            # UTC-aware, never naive datetime.now(): a naive local timestamp
+            # sent as a TIMESTAMPTZ literal is taken at face value, which
+            # would skew valid_from away from the server's UTC recorded_at
+            # by the host's offset -- exactly the kind of bug this schema's
+            # bitemporal gate (valid_from <= as_of <= ...) is unforgiving of.
+            "transition_at": transition_at or datetime.now(UTC),
+        }
+
+        for attempt in range(max_serialization_retries + 1):
+            try:
+                return self._transition_fact_once(params)
+            except Exception as exc:
+                if _sqlstate(exc) != "40001" or attempt >= max_serialization_retries:
+                    raise RecallError("Bitemporal fact transition failed.") from exc
+                sleep(0.025 * (2**attempt))
+        raise AssertionError("serialization retry loop must return or raise")
+
+    def _transition_fact_once(self, params: dict[str, Any]) -> FactTransitionResult:
+        with self._connection_provider() as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                    cursor.execute(INSERT_TRANSITIONED_FACT_SQL, params)
+                    new_row = cursor.fetchone()
+                    if new_row is None:
+                        raise RecallError(
+                            "Bitemporal fact transition insert returned no row."
+                        )
+                    _, valid_from, recorded_at = new_row
+                    cursor.execute(CLOSE_SUPERSEDED_FACT_SQL, params)
+                    superseded_row = cursor.fetchone()
+        return FactTransitionResult(
+            new_fact_id=_uuid(params["new_fact_id"]),
+            valid_from=valid_from,
+            recorded_at=recorded_at,
+            superseded_fact_id=(
+                _optional_uuid(superseded_row[0]) if superseded_row else None
+            ),
+        )
+
+    def fact_history(
+        self, *, org_id: UUID, subject: str, predicate: str
+    ) -> tuple[FactHistoryEntry, ...]:
+        """Full belief history for (subject, predicate), oldest first -- the
+        audit/explainability view behind "why did the agent think X".
+        """
+
+        params = {"org_id": org_id, "subject": subject, "predicate": predicate}
+        try:
+            with self._connection_provider() as connection:
+                with connection.transaction():
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET TRANSACTION READ ONLY")
+                        rows = _fetch(cursor, FACT_HISTORY_SQL, params)
+        except Exception as exc:
+            raise RecallError("Fact history lookup failed.") from exc
+        return tuple(
+            FactHistoryEntry(
+                fact_id=_uuid(row["fact_id"]),
+                object=_json_value(row.get("object")),
+                confidence=float(row.get("confidence") or 0.0),
+                source=row.get("source"),
+                valid_from=_datetime(row.get("valid_from")),
+                valid_to=_datetime(row.get("valid_to")),
+                recorded_at=_datetime(row.get("recorded_at")),
+                superseded_by=_optional_uuid(row.get("superseded_by")),
+            )
+            for row in rows
+        )
 
     def recall(self, query: RecallQuery) -> RecallBundle:
         if query.cold_start:
@@ -234,19 +433,29 @@ def _episode(row: dict[str, Any]) -> MemoryCandidate:
 
 def _fact(row: dict[str, Any]) -> MemoryCandidate:
     object_value = _json_value(row.get("object"))
+    predecessor = _json_value(row.get("predecessor"))
+    metadata: dict[str, Any] = {
+        "subject": row.get("subject"),
+        "predicate": row.get("predicate"),
+        "object": object_value,
+        "source": row.get("source"),
+        "valid_from": _text(row.get("valid_from")),
+        "valid_to": _text(row.get("valid_to")),
+        "learned_at": _text(row.get("recorded_at")),
+        # Bitemporal audit trail: which fact (if any) this one superseded, and
+        # which fact (if any) has since superseded this one. A non-null
+        # `superseded_by` here would mean a stale fact leaked past the
+        # valid_to filter in SEMANTIC_RECALL_SQL -- it should always be NULL
+        # for a candidate returned as "currently valid at as_of".
+        "superseded_by": _text(row.get("superseded_by")),
+        "superseded_predecessor": predecessor if isinstance(predecessor, dict) else None,
+    }
     return MemoryCandidate(
         memory_id=_uuid(row["fact_id"]),
         kind=MemoryKind.SEMANTIC,
         content=f"{row.get('subject')} {row.get('predicate')}: {object_value}",
         similarity=float(row.get("similarity") or 0.0),
-        metadata={
-            "subject": row.get("subject"),
-            "predicate": row.get("predicate"),
-            "object": object_value,
-            "source": row.get("source"),
-            "valid_from": _text(row.get("valid_from")),
-            "learned_at": _text(row.get("recorded_at")),
-        },
+        metadata=metadata,
         org_id=_optional_uuid(row.get("org_id")),
         agent_id=_optional_uuid(row.get("agent_id")),
         service_id=_optional_uuid(row.get("scoped_service_id")),
@@ -336,3 +545,9 @@ def _datetime(value: Any) -> datetime | None:
 
 def _text(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _sqlstate(exc: Exception) -> str | None:
+    return getattr(exc, "sqlstate", None) or getattr(
+        getattr(exc, "__cause__", None), "sqlstate", None
+    )

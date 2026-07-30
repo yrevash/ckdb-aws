@@ -120,6 +120,24 @@ class RecallRanker:
                     "runbook_success_rate": self.policy.min_runbook_success_rate,
                     "positive_provenance": self.policy.min_positive_provenance,
                 },
+                # Bitemporal audit signal for the console/UI (research/postmortem
+                # /01-memory-architecture.md §2): how many of the returned facts
+                # are transitions (they superseded an earlier belief) versus
+                # first-time assertions, plus a hard invariant check that no
+                # returned fact is itself already superseded -- that would mean
+                # a stale fact leaked past the valid-time gate upstream.
+                "bitemporal": {
+                    "facts_with_predecessor": sum(
+                        1
+                        for item in ranked_facts
+                        if item.metadata.get("superseded_predecessor") is not None
+                    ),
+                    "stale_facts_returned": sum(
+                        1
+                        for item in ranked_facts
+                        if item.metadata.get("superseded_by") is not None
+                    ),
+                },
             },
         )
 

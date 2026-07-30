@@ -116,6 +116,10 @@ class Conductor:
             return self._inject_payment_provider_outage(scenario)
         if family == "F10_NOVEL":
             return self._inject_novel(scenario)
+        if family == "F11_POOL_DRIVER_MIGRATION":
+            return self._inject_pool_driver_migration(scenario)
+        if family == "F12_CACHE_TOPOLOGY_MIGRATION":
+            return self._inject_cache_topology_migration(scenario)
         raise SimulationError(f"unsupported incident family: {family}")
 
     def observe_incident(self, incident_id: str) -> IncidentObservation:
@@ -147,6 +151,7 @@ class Conductor:
             slo_threshold=slo.threshold,
             current_version=service.current_version,
             previous_stable_version=service.previous_stable_version,
+            observed_at=self.state.now,
         )
 
     def apply_action(
@@ -423,6 +428,65 @@ class Conductor:
             current_value=float(scenario["fault"]["p99_ms"]),
             signal="ambiguous clock-skew signature with no known causal pattern",
             error_code="UNKNOWN_FAILURE",
+        )
+
+    def _inject_pool_driver_migration(self, scenario: dict[str, Any]) -> Incident:
+        """Temporal-drift family: a once-correct pool-exhaustion fix
+        (raise db_pool_size, then restart) stops working once the platform
+        migrates the service off the legacy thread-pool driver onto a
+        multiplexed one. The incident looks identical (same signal, same
+        error code) before and after; only the environment fact
+        `pool_driver` -- itself a bitemporal config transition via
+        `_set_config` -- has changed, so the *correct* remediation depends on
+        which fact was valid at the incident's decision time, not just on
+        the alert text.
+        """
+
+        service = self.state.services[scenario["target_service"]]
+        service.health = Health.DEGRADED
+        if scenario["fault"].get("environment_migrated", False):
+            self._set_config(
+                service.name, "pool_driver", "multiplexed", source="platform_migration"
+            )
+        return self._open_incident(
+            scenario,
+            slo_kind="latency",
+            current_value=float(scenario["fault"]["p99_ms"]),
+            signal="database too many connections; p99 latency breached",
+            error_code="DB_POOL_EXHAUSTED",
+        )
+
+    def _inject_cache_topology_migration(self, scenario: dict[str, Any]) -> Incident:
+        """Temporal-drift family: a once-correct cache failover target
+        (fail over to the on-prem redis replica) stops working once the
+        platform migrates cache topology to a managed cache service and
+        decommissions the on-prem replica. Same cascading-cache signal
+        before and after; the fact that has changed is which failover target
+        is currently sanctioned (`cache_failover_target`), tracked the same
+        bitemporal way as any other config transition.
+        """
+
+        dependency_key = scenario["fault"]["dependency_key"]
+        dependency = self.state.dependencies[dependency_key]
+        service = self.state.services[scenario["target_service"]]
+        if scenario["fault"].get("environment_migrated", False):
+            self._set_config(
+                service.name,
+                "cache_failover_target",
+                "cache-managed-primary",
+                source="platform_migration",
+            )
+            self.state.services["cache-onprem-replica"].health = Health.DOWN
+        dependency.to_service = scenario["fault"]["failed_service"]
+        dependency.status = "degraded"
+        self.state.services[dependency.to_service].health = Health.DOWN
+        service.health = Health.DEGRADED
+        return self._open_incident(
+            scenario,
+            slo_kind="availability",
+            current_value=float(scenario["fault"]["availability"]),
+            signal=f"cache timeout cascade through {dependency.to_service}",
+            error_code="CACHE_TIMEOUT",
         )
 
     def _open_incident(

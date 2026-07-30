@@ -122,6 +122,12 @@ class IncidentObservation:
     slo_threshold: float
     current_version: str
     previous_stable_version: str | None
+    # Simulated decision time (WorldState.now at observation). Not a ground-
+    # truth label -- it is the same "as of" wall-clock a responder would have
+    # in production, and it is what makes bitemporal-aware recall possible:
+    # without it, a responder has no way to tell a currently-valid fact from
+    # one that has since been superseded by an environment change.
+    observed_at: datetime
 
 
 @dataclass

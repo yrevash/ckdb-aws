@@ -1,0 +1,321 @@
+# Phase 3, Track A — local simulated multi-region CockroachDB cluster.
+#
+# 9 nodes = 3 regions x 3 zones (the documented production floor for
+# `SURVIVE REGION FAILURE`, RF=5 2+2+1 — see research/postmortem/04-cockroachdb-
+# deployment-resilience.md). This is a SEPARATE cluster from docker-compose.yml's
+# single node: distinct network, distinct ports (26400-26408 SQL / 8090-8098 HTTP
+# vs. the Phase 1/2 node's 26257/8080), distinct volumes. It never talks to the
+# Phase 1/2 node and bringing it up/down never touches that node's data.
+#
+# Region layout mirrors research/postmortem/04-cockroachdb-deployment-resilience.md
+# §1.2: us-east-1, us-east-2, us-west-2. us-east-2 is the region the failover demo
+# kills (scripts/failover_demo.sh).
+#
+# Bring-up: scripts/failover_demo.sh or scripts/verify_phase3.sh (idempotent).
+# Manual bring-up:
+#   docker compose -f docker-compose.multiregion.yml up -d
+#   docker compose -f docker-compose.multiregion.yml run --rm mr-init
+#   docker compose -f docker-compose.multiregion.yml run --rm mr-migrate
+#   docker compose -f docker-compose.multiregion.yml run --rm mr-bootstrap-multiregion
+
+# Explicit project name: without this, Compose infers the project name from
+# the directory (shared with docker-compose.yml's default project, since both
+# files live in this repo root), which makes the Phase 1/2 single node show up
+# as an "orphan container" of this project and at risk from `--remove-orphans`.
+# A distinct project name keeps the two clusters fully isolated in Docker's
+# bookkeeping, not just in ports/networks/volumes.
+name: postmortem-multiregion
+
+x-cockroach-image: &cockroach-image cockroachdb/cockroach:v26.2.0
+
+# Keep per-node footprint small — this is a demo-scale cluster (9 processes on
+# one laptop-class host), not a production sizing. See 04's §1.4 note on the
+# documented gap between "what we demo" and "what we'd run in prod."
+x-node-resources: &node-resources --cache=128MiB --max-sql-memory=128MiB
+
+services:
+  # ---------------------------------------------------------------------------
+  # us-east-1 (primary region)
+  # ---------------------------------------------------------------------------
+  crdb-use1-a:
+    image: *cockroach-image
+    hostname: crdb-use1-a
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use1-a:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-1,zone=a
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26400:26257", "8090:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use1-a-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-use1-b:
+    image: *cockroach-image
+    hostname: crdb-use1-b
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use1-b:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-1,zone=b
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26401:26257", "8091:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use1-b-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-use1-c:
+    image: *cockroach-image
+    hostname: crdb-use1-c
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use1-c:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-1,zone=c
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26402:26257", "8092:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use1-c-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # ---------------------------------------------------------------------------
+  # us-east-2 (the region scripts/failover_demo.sh kills)
+  # ---------------------------------------------------------------------------
+  crdb-use2-a:
+    image: *cockroach-image
+    hostname: crdb-use2-a
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use2-a:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-2,zone=a
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26403:26257", "8093:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use2-a-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-use2-b:
+    image: *cockroach-image
+    hostname: crdb-use2-b
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use2-b:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-2,zone=b
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26404:26257", "8094:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use2-b-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-use2-c:
+    image: *cockroach-image
+    hostname: crdb-use2-c
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-use2-c:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-east-2,zone=c
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26405:26257", "8095:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-use2-c-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # ---------------------------------------------------------------------------
+  # us-west-2
+  # ---------------------------------------------------------------------------
+  crdb-usw2-a:
+    image: *cockroach-image
+    hostname: crdb-usw2-a
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-usw2-a:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-west-2,zone=a
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26406:26257", "8096:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-usw2-a-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-usw2-b:
+    image: *cockroach-image
+    hostname: crdb-usw2-b
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-usw2-b:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-west-2,zone=b
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26407:26257", "8097:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-usw2-b-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  crdb-usw2-c:
+    image: *cockroach-image
+    hostname: crdb-usw2-c
+    command: >-
+      start --insecure
+      --store=/cockroach/cockroach-data
+      --listen-addr=0.0.0.0:26257
+      --http-addr=0.0.0.0:8080
+      --advertise-addr=crdb-usw2-c:26257
+      --join=crdb-use1-a:26257,crdb-use1-b:26257,crdb-use1-c:26257,crdb-use2-a:26257,crdb-use2-b:26257,crdb-use2-c:26257,crdb-usw2-a:26257,crdb-usw2-b:26257,crdb-usw2-c:26257
+      --locality=region=us-west-2,zone=c
+      --max-offset=250ms
+      --cache=128MiB --max-sql-memory=128MiB
+    ports: ["26408:26257", "8098:8080"]
+    networks: [postmortem-multiregion]
+    volumes: ["mr-usw2-c-data:/cockroach/cockroach-data"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # ---------------------------------------------------------------------------
+  # One-shot init / migrate steps. Run explicitly via `docker compose run --rm
+  # <name>` (scripts/failover_demo.sh and scripts/measure_resilience.sh do this)
+  # rather than `up`, so they don't loop or block `docker compose up`.
+  # ---------------------------------------------------------------------------
+  mr-init:
+    image: *cockroach-image
+    profiles: ["tools"]
+    networks: [postmortem-multiregion]
+    depends_on:
+      crdb-use1-a: {condition: service_healthy}
+      crdb-use1-b: {condition: service_healthy}
+      crdb-use1-c: {condition: service_healthy}
+      crdb-use2-a: {condition: service_healthy}
+      crdb-use2-b: {condition: service_healthy}
+      crdb-use2-c: {condition: service_healthy}
+      crdb-usw2-a: {condition: service_healthy}
+      crdb-usw2-b: {condition: service_healthy}
+      crdb-usw2-c: {condition: service_healthy}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        # Idempotent: if the cluster is already initialized, `cockroach init`
+        # returns a "already been initialized" error — treat that as success.
+        if cockroach sql --insecure --host=crdb-use1-a:26257 --execute="SELECT 1;" >/dev/null 2>&1; then
+          echo "cluster already initialized"
+          exit 0
+        fi
+        cockroach init --insecure --host=crdb-use1-a:26257
+        for i in $(seq 1 60); do
+          if cockroach sql --insecure --host=crdb-use1-a:26257 --execute="SELECT 1;" >/dev/null 2>&1; then
+            echo "cluster initialized and accepting SQL"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "cluster did not become ready after init" >&2
+        exit 1
+
+  mr-migrate:
+    image: *cockroach-image
+    profiles: ["tools"]
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "/workspace/db/apply.sh"]
+    environment:
+      DATABASE_URL: postgresql://root@crdb-use1-a:26257/defaultdb?sslmode=disable
+    volumes: ["./:/workspace:ro"]
+    networks: [postmortem-multiregion]
+
+  mr-bootstrap-multiregion:
+    image: *cockroach-image
+    profiles: ["tools"]
+    working_dir: /workspace
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        cockroach sql \
+          --url "postgresql://root@crdb-use1-a:26257/postmortem?sslmode=disable" \
+          --file /workspace/db/bootstrap/010_multiregion.sql
+    volumes: ["./:/workspace:ro"]
+    networks: [postmortem-multiregion]
+
+networks:
+  postmortem-multiregion:
+    name: postmortem-multiregion
+
+volumes:
+  mr-use1-a-data:
+  mr-use1-b-data:
+  mr-use1-c-data:
+  mr-use2-a-data:
+  mr-use2-b-data:
+  mr-use2-c-data:
+  mr-usw2-a-data:
+  mr-usw2-b-data:
+  mr-usw2-c-data:

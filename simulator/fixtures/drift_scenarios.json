@@ -1,0 +1,151 @@
+{
+  "seed": 20260801,
+  "start_time": "2026-07-01T00:00:00Z",
+  "services": [
+    {
+      "name": "risk-svc",
+      "tier": "critical-path",
+      "owner_team": "risk",
+      "current_version": "1.0.0",
+      "previous_stable_version": "0.9.0",
+      "capacity_units": 3
+    },
+    {
+      "name": "storefront-svc",
+      "tier": "critical-path",
+      "owner_team": "commerce",
+      "current_version": "1.0.0",
+      "previous_stable_version": "0.9.0",
+      "capacity_units": 3
+    },
+    {
+      "name": "cache-onprem-primary",
+      "tier": "standard",
+      "owner_team": "platform",
+      "current_version": "6.2",
+      "capacity_units": 2
+    },
+    {
+      "name": "cache-onprem-replica",
+      "tier": "standard",
+      "owner_team": "platform",
+      "current_version": "6.2",
+      "capacity_units": 2
+    },
+    {
+      "name": "cache-managed-primary",
+      "tier": "standard",
+      "owner_team": "platform",
+      "current_version": "managed-v1",
+      "capacity_units": 4
+    }
+  ],
+  "dependencies": [
+    {
+      "dependency_key": "storefront-cache",
+      "from_service": "storefront-svc",
+      "to_service": "cache-onprem-primary",
+      "dependency_type": "cache",
+      "criticality": "degraded-ok"
+    }
+  ],
+  "slos": [
+    {
+      "service": "risk-svc",
+      "kind": "latency",
+      "threshold": 700,
+      "window_seconds": 300,
+      "baseline": 180
+    },
+    {
+      "service": "storefront-svc",
+      "kind": "availability",
+      "threshold": 0.995,
+      "window_seconds": 300,
+      "baseline": 0.9995
+    }
+  ],
+  "configs": [
+    {
+      "service": "risk-svc",
+      "key": "db_pool_size",
+      "value": 20
+    },
+    {
+      "service": "risk-svc",
+      "key": "pool_driver",
+      "value": "legacy"
+    },
+    {
+      "service": "storefront-svc",
+      "key": "cache_failover_target",
+      "value": "cache-onprem-replica"
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "f11-pool-legacy",
+      "family_id": "F11_POOL_DRIVER_MIGRATION",
+      "variant_id": "legacy-driver",
+      "title": "Risk service latency breach under legacy pool driver",
+      "severity": "SEV2",
+      "target_service": "risk-svc",
+      "inject_at_seconds": 0,
+      "failed_orders": 3,
+      "fault": {
+        "p99_ms": 3400,
+        "burn_rate": 8.0,
+        "environment_migrated": false
+      }
+    },
+    {
+      "scenario_id": "f11-pool-migrated",
+      "family_id": "F11_POOL_DRIVER_MIGRATION",
+      "variant_id": "multiplexed-driver",
+      "title": "Risk service latency breach after pool driver migration",
+      "severity": "SEV2",
+      "target_service": "risk-svc",
+      "inject_at_seconds": 21600,
+      "failed_orders": 3,
+      "fault": {
+        "p99_ms": 3500,
+        "burn_rate": 8.0,
+        "environment_migrated": true
+      }
+    },
+    {
+      "scenario_id": "f12-cache-onprem",
+      "family_id": "F12_CACHE_TOPOLOGY_MIGRATION",
+      "variant_id": "onprem-topology",
+      "title": "Storefront cache timeout cascade on on-prem topology",
+      "severity": "SEV2",
+      "target_service": "storefront-svc",
+      "inject_at_seconds": 43200,
+      "failed_orders": 4,
+      "fault": {
+        "dependency_key": "storefront-cache",
+        "failed_service": "cache-onprem-primary",
+        "availability": 0.91,
+        "burn_rate": 10.0,
+        "environment_migrated": false
+      }
+    },
+    {
+      "scenario_id": "f12-cache-managed",
+      "family_id": "F12_CACHE_TOPOLOGY_MIGRATION",
+      "variant_id": "managed-topology",
+      "title": "Storefront cache timeout cascade after managed-cache migration",
+      "severity": "SEV2",
+      "target_service": "storefront-svc",
+      "inject_at_seconds": 64800,
+      "failed_orders": 4,
+      "fault": {
+        "dependency_key": "storefront-cache",
+        "failed_service": "cache-onprem-primary",
+        "availability": 0.90,
+        "burn_rate": 10.0,
+        "environment_migrated": true
+      }
+    }
+  ]
+}
