@@ -1,0 +1,233 @@
+{
+  "memories": [
+    {
+      "memory_id": "mem-f1-rollback",
+      "family_id": "F1_BAD_DEPLOY",
+      "gold": true,
+      "text": "HTTP 5xx regression immediately after canary deploy. Scaling had no effect. Roll back the affected service to the previous stable version and verify error rate.",
+      "actions": [
+        {
+          "action_type": "rollback_deploy",
+          "target_service": "$incident.service",
+          "params": {
+            "target_version": "$incident.previous_stable_version"
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f2-pool",
+      "family_id": "F2_POOL_EXHAUSTION",
+      "gold": true,
+      "text": "Database too many connections and high p99 latency indicate connection pool exhaustion. Raise db_pool_size to 80, then restart the affected worker.",
+      "actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "db_pool_size",
+            "value": 80
+          }
+        },
+        {
+          "action_type": "restart_service",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f3-cache",
+      "family_id": "F3_CACHE_OUTAGE",
+      "gold": true,
+      "text": "Cache timeout cascade reduced checkout availability. Repoint checkout-cache to the healthy redis cluster v2 replica.",
+      "actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "checkout-cache",
+            "to_service": "redis-cluster-v2-replica"
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f4-saturation",
+      "family_id": "F4_TRAFFIC_SATURATION",
+      "gold": true,
+      "text": "Traffic spike saturated CPU utilization and latency. Scale capacity to 8 units and temporarily throttle traffic to 75 percent.",
+      "actions": [
+        {
+          "action_type": "scale_service",
+          "target_service": "$incident.service",
+          "params": {
+            "capacity_units": 8
+          }
+        },
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 75
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f5-retries",
+      "family_id": "F5_RETRY_STORM",
+      "gold": true,
+      "text": "Retry storm amplified request rate after an upstream blip. Scaling alone intensified retries; throttle traffic to 60 percent.",
+      "actions": [
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 60
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f6-leak",
+      "family_id": "F6_MEMORY_LEAK",
+      "gold": true,
+      "text": "Gradual memory leak reached OOM pressure and process crashes. Restart the affected worker to recover while paging the owning team for a permanent fix.",
+      "actions": [
+        {
+          "action_type": "restart_service",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f7-config",
+      "family_id": "F7_CONFIG_REGRESSION",
+      "gold": true,
+      "text": "Validation error spike followed the express checkout config flag change. Revert express_checkout_enabled to false.",
+      "actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "express_checkout_enabled",
+            "value": false
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f8-datastore",
+      "family_id": "F8_DATASTORE_FAILOVER",
+      "gold": true,
+      "text": "Orders datastore primary became unavailable and writes failed. Fail over checkout-orders to orders-db-replica.",
+      "actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "checkout-orders",
+            "to_service": "orders-db-replica"
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "mem-f9-provider",
+      "family_id": "F9_PAYMENT_PROVIDER_OUTAGE",
+      "gold": true,
+      "text": "Upstream payment provider authorization outage blocked orders. Fail over payment-provider to the secondary and throttle traffic to 50 percent during recovery.",
+      "actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "payment-provider",
+            "to_service": "payment-provider-secondary"
+          }
+        },
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 50
+          }
+        }
+      ]
+    },
+    {
+      "memory_id": "noise-certificate",
+      "family_id": "DISTRACTOR",
+      "text": "Expired TLS certificate caused ingress handshake failures. Rotate the certificate and reload the edge proxy.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-dns",
+      "family_id": "DISTRACTOR",
+      "text": "DNS negative caching delayed discovery after a record migration. Flush resolver caches and lower TTL.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-disk",
+      "family_id": "DISTRACTOR",
+      "text": "Disk pressure on analytics workers blocked temporary file creation. Expand the volume and clean old artifacts.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-kafka",
+      "family_id": "DISTRACTOR",
+      "text": "Kafka consumer lag rose after a partition rebalance. Restore consumers and verify offsets advance.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-email",
+      "family_id": "DISTRACTOR",
+      "text": "Email delivery queue accumulated after SMTP rate limiting. Reduce batch size and drain the queue.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-search",
+      "family_id": "DISTRACTOR",
+      "text": "Search indexing lag followed a bulk import. Pause ingestion and allow index workers to catch up.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-auth",
+      "family_id": "DISTRACTOR",
+      "text": "Authentication failures followed signing key rotation. Refresh the JWKS cache across API gateways.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-backup",
+      "family_id": "DISTRACTOR",
+      "text": "Backup jobs exceeded their window because snapshots overlapped. Reschedule compaction and retry backup.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-websocket",
+      "family_id": "DISTRACTOR",
+      "text": "Websocket clients disconnected after idle timeout reduction. Restore the timeout and reconnect clients.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-image",
+      "family_id": "DISTRACTOR",
+      "text": "Image processing jobs failed on malformed metadata. Quarantine the bad object and replay the queue.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-feature",
+      "family_id": "DISTRACTOR",
+      "text": "Recommendation quality dropped after a model feature rollout. Disable the feature and rebuild embeddings.",
+      "actions": []
+    },
+    {
+      "memory_id": "noise-audit",
+      "family_id": "DISTRACTOR",
+      "text": "Audit export was delayed by object storage permissions. Restore the writer role and replay the export.",
+      "actions": []
+    }
+  ]
+}

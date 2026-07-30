@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "postmortem-backend"
+version = "0.1.0"
+description = "Phase 1 Postmortem responder and atomic remediation backend"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "boto3>=1.34",
+  "fastapi>=0.115",
+  "psycopg[binary,pool]>=3.2",
+  "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+strands = [
+  "strands-agents>=1.0",
+]
+test = [
+  "httpx>=0.27",
+  "pytest>=8.3",
+]
+
+[project.scripts]
+postmortem-backend = "postmortem_backend.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/postmortem_backend"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+

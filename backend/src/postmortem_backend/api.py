@@ -1,0 +1,164 @@
+"""FastAPI transport for responder turns and console event streaming."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import UTC, datetime
+from uuid import UUID
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from .config import Settings
+from .domain import IncidentSignal, OutcomeCommand, OutcomeKind
+from .errors import PostmortemError
+from .runtime import Runtime, build_runtime
+from .transport import console_region, sse_message
+
+
+class RespondRequest(BaseModel):
+    session_id: UUID
+    service_id: UUID
+    severity: str = Field(min_length=1, max_length=20)
+    summary: str = Field(min_length=1, max_length=8_000)
+    error_signature: str | None = Field(default=None, max_length=500)
+    service_tags: list[str] = Field(default_factory=list, max_length=50)
+    metadata: dict[str, object] = Field(default_factory=dict)
+    approved: bool = False
+    cold_start: bool = False
+
+
+class OutcomeRequest(BaseModel):
+    action_id: UUID
+    service_id: UUID
+    outcome: OutcomeKind
+    summary: str = Field(min_length=1, max_length=8_000)
+    error_signature: str | None = Field(default=None, max_length=500)
+    observed_at: datetime | None = None
+
+
+def create_app(
+    settings: Settings | None = None, runtime: Runtime | None = None
+) -> FastAPI:
+    selected_settings = settings or Settings.from_env()
+    selected_runtime = runtime or build_runtime(selected_settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        selected_runtime.close()
+
+    app = FastAPI(
+        title="Postmortem responder",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.state.runtime = selected_runtime
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(selected_settings.cors_origins),
+        allow_methods=["GET", "POST"],
+        allow_headers=["content-type"],
+    )
+
+    @app.exception_handler(PostmortemError)
+    async def postmortem_error(_: Request, exc: PostmortemError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.get("/healthz")
+    def health() -> dict[str, object]:
+        return {
+            "status": "ok",
+            "runtimeMode": selected_settings.runtime_mode,
+            "recallBackend": selected_settings.recall_backend,
+            "coldStart": selected_settings.cold_start,
+            "components": {
+                "responder": "ready",
+                "eventStream": "ready",
+                "cockroachdb": (
+                    "configured" if selected_settings.runtime_mode == "aws" else "fake"
+                ),
+                "bedrock": (
+                    "configured" if selected_settings.runtime_mode == "aws" else "fake"
+                ),
+            },
+        }
+
+    app.add_api_route("/health", health, methods=["GET"], include_in_schema=False)
+
+    @app.post("/v1/incidents/{incident_id}/respond")
+    def respond(incident_id: UUID, body: RespondRequest) -> object:
+        signal = IncidentSignal(
+            incident_id=incident_id,
+            session_id=body.session_id,
+            org_id=selected_settings.org_id,
+            agent_id=selected_settings.agent_id,
+            service_id=body.service_id,
+            severity=body.severity,
+            summary=body.summary,
+            error_signature=body.error_signature,
+            service_tags=tuple(body.service_tags),
+            metadata={**body.metadata, "cold_start": body.cold_start},
+        )
+        result = selected_runtime.responder.handle(signal, approved=body.approved)
+        return jsonable_encoder(asdict(result))
+
+    @app.get("/v1/incidents/{incident_id}")
+    def incident(incident_id: UUID) -> object:
+        history = selected_runtime.events.history(incident_id)
+        view = selected_runtime.responder.registry.view(incident_id, len(history))
+        if view is None:
+            raise HTTPException(status_code=404, detail="Incident not found.")
+        return view.to_dict()
+
+    @app.post("/v1/incidents/{incident_id}/outcomes")
+    def record_outcome(incident_id: UUID, body: OutcomeRequest) -> object:
+        result = selected_runtime.outcomes.record(
+            OutcomeCommand(
+                org_id=selected_settings.org_id,
+                agent_id=selected_settings.agent_id,
+                incident_id=incident_id,
+                service_id=body.service_id,
+                action_id=body.action_id,
+                outcome=body.outcome,
+                summary=body.summary,
+                error_signature=body.error_signature,
+                observed_at=body.observed_at or datetime.now(UTC),
+            )
+        )
+        return jsonable_encoder(asdict(result))
+
+    @app.get("/v1/incidents/{incident_id}/events")
+    def events(incident_id: UUID) -> StreamingResponse:
+        def event_stream() -> Iterator[str]:
+            sequence = 0
+            for event in selected_runtime.events.stream(incident_id):
+                if event is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                sequence += 1
+                yield sse_message(
+                    event,
+                    sequence=sequence,
+                    agent_id=str(selected_settings.agent_id),
+                    agent_region=console_region(selected_settings.aws_region),
+                )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return app

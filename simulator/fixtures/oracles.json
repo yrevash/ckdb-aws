@@ -1,0 +1,167 @@
+{
+  "scenarios": {
+    "f2-near-miss-slow-query": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "no_op_page_human",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    }
+  },
+  "families": {
+    "F1_BAD_DEPLOY": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "rollback_deploy",
+          "target_service": "$incident.service",
+          "params": {
+            "target_version": "$incident.previous_stable_version"
+          }
+        }
+      ]
+    },
+    "F2_POOL_EXHAUSTION": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "db_pool_size",
+            "value": 80
+          }
+        },
+        {
+          "action_type": "restart_service",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    },
+    "F3_CACHE_OUTAGE": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "checkout-cache",
+            "to_service": "redis-cluster-v2-replica"
+          }
+        }
+      ]
+    },
+    "F4_TRAFFIC_SATURATION": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "scale_service",
+          "target_service": "$incident.service",
+          "params": {
+            "capacity_units": 8
+          }
+        },
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 75
+          }
+        }
+      ]
+    },
+    "F5_RETRY_STORM": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 60
+          }
+        }
+      ]
+    },
+    "F6_MEMORY_LEAK": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "restart_service",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    },
+    "F7_CONFIG_REGRESSION": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "set_config",
+          "target_service": "$incident.service",
+          "params": {
+            "key": "express_checkout_enabled",
+            "value": false
+          }
+        }
+      ]
+    },
+    "F8_DATASTORE_FAILOVER": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "checkout-orders",
+            "to_service": "orders-db-replica"
+          }
+        }
+      ]
+    },
+    "F9_PAYMENT_PROVIDER_OUTAGE": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "failover_dependency",
+          "target_service": "$incident.service",
+          "params": {
+            "dependency_key": "payment-provider",
+            "to_service": "payment-provider-secondary"
+          }
+        },
+        {
+          "action_type": "throttle_traffic",
+          "target_service": "$incident.service",
+          "params": {
+            "traffic_percent": 50
+          }
+        }
+      ]
+    },
+    "F10_NOVEL": {
+      "action_seconds": 120,
+      "wrong_action_penalty_seconds": 300,
+      "required_actions": [
+        {
+          "action_type": "no_op_page_human",
+          "target_service": "$incident.service",
+          "params": {}
+        }
+      ]
+    }
+  }
+}

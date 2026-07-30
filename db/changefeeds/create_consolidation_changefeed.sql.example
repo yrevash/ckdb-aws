@@ -1,0 +1,20 @@
+-- Deployment template: substitute the HTTPS API Gateway URL and secret.
+-- Keep the rendered file outside source control because the auth header is stored
+-- with the CockroachDB changefeed job.
+
+USE postmortem;
+
+CREATE CHANGEFEED FOR TABLE episodic_events
+INTO 'webhook-https://REPLACE_WITH_API_GATEWAY_HOST/changefeed'
+WITH
+    initial_scan = 'no',
+    updated,
+    resolved = '10s',
+    on_error = 'pause',
+    webhook_auth_header = 'Bearer REPLACE_WITH_CHANGEFEED_SECRET',
+    webhook_client_timeout = '5s',
+    webhook_sink_config = '{
+      "Flush": {"Messages": 100, "Frequency": "2s"},
+      "Retry": {"Max": 8, "Backoff": "1s"}
+    }';
+

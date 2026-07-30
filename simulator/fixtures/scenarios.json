@@ -1,0 +1,655 @@
+{
+  "seed": 20260730,
+  "start_time": "2026-07-01T00:00:00Z",
+  "services": [
+    {
+      "name": "checkout-svc",
+      "tier": "critical-path",
+      "owner_team": "commerce",
+      "current_version": "1.4.2",
+      "previous_stable_version": "1.4.1",
+      "capacity_units": 4
+    },
+    {
+      "name": "payment-svc",
+      "tier": "critical-path",
+      "owner_team": "payments",
+      "current_version": "2.3.1",
+      "previous_stable_version": "2.3.0",
+      "capacity_units": 4
+    },
+    {
+      "name": "fraud-svc",
+      "tier": "critical-path",
+      "owner_team": "risk",
+      "current_version": "3.8.0",
+      "previous_stable_version": "3.7.4",
+      "capacity_units": 3
+    },
+    {
+      "name": "orders-db",
+      "tier": "critical-path",
+      "owner_team": "commerce",
+      "current_version": "26.2",
+      "capacity_units": 3
+    },
+    {
+      "name": "orders-db-replica",
+      "tier": "critical-path",
+      "owner_team": "commerce",
+      "current_version": "26.2",
+      "capacity_units": 3
+    },
+    {
+      "name": "ledger-svc",
+      "tier": "critical-path",
+      "owner_team": "finance",
+      "current_version": "4.2.0",
+      "capacity_units": 2
+    },
+    {
+      "name": "redis-cluster-v2",
+      "tier": "standard",
+      "owner_team": "platform",
+      "current_version": "7.4.1",
+      "capacity_units": 3
+    },
+    {
+      "name": "redis-cluster-v2-replica",
+      "tier": "standard",
+      "owner_team": "platform",
+      "current_version": "7.4.1",
+      "capacity_units": 3
+    },
+    {
+      "name": "payment-provider-primary",
+      "tier": "standard",
+      "owner_team": "payments",
+      "current_version": "api-v3",
+      "capacity_units": 3
+    },
+    {
+      "name": "payment-provider-secondary",
+      "tier": "standard",
+      "owner_team": "payments",
+      "current_version": "api-v2",
+      "capacity_units": 3
+    }
+  ],
+  "dependencies": [
+    {
+      "dependency_key": "checkout-payment",
+      "from_service": "checkout-svc",
+      "to_service": "payment-svc",
+      "dependency_type": "sync",
+      "criticality": "required"
+    },
+    {
+      "dependency_key": "payment-fraud",
+      "from_service": "payment-svc",
+      "to_service": "fraud-svc",
+      "dependency_type": "sync",
+      "criticality": "required"
+    },
+    {
+      "dependency_key": "payment-provider",
+      "from_service": "payment-svc",
+      "to_service": "payment-provider-primary",
+      "dependency_type": "external",
+      "criticality": "required"
+    },
+    {
+      "dependency_key": "checkout-orders",
+      "from_service": "checkout-svc",
+      "to_service": "orders-db",
+      "dependency_type": "datastore",
+      "criticality": "required"
+    },
+    {
+      "dependency_key": "checkout-cache",
+      "from_service": "checkout-svc",
+      "to_service": "redis-cluster-v2",
+      "dependency_type": "cache",
+      "criticality": "degraded-ok"
+    },
+    {
+      "dependency_key": "orders-ledger",
+      "from_service": "orders-db",
+      "to_service": "ledger-svc",
+      "dependency_type": "async",
+      "criticality": "required"
+    }
+  ],
+  "slos": [
+    {
+      "service": "checkout-svc",
+      "kind": "error_rate",
+      "threshold": 0.01,
+      "window_seconds": 300,
+      "baseline": 0.002
+    },
+    {
+      "service": "checkout-svc",
+      "kind": "latency",
+      "threshold": 800,
+      "window_seconds": 300,
+      "baseline": 220
+    },
+    {
+      "service": "checkout-svc",
+      "kind": "availability",
+      "threshold": 0.995,
+      "window_seconds": 300,
+      "baseline": 0.9995
+    },
+    {
+      "service": "checkout-svc",
+      "kind": "saturation",
+      "threshold": 0.85,
+      "window_seconds": 300,
+      "baseline": 0.42
+    },
+    {
+      "service": "payment-svc",
+      "kind": "error_rate",
+      "threshold": 0.01,
+      "window_seconds": 300,
+      "baseline": 0.001
+    },
+    {
+      "service": "payment-svc",
+      "kind": "availability",
+      "threshold": 0.995,
+      "window_seconds": 300,
+      "baseline": 0.9997
+    },
+    {
+      "service": "payment-svc",
+      "kind": "latency",
+      "threshold": 700,
+      "window_seconds": 300,
+      "baseline": 190
+    },
+    {
+      "service": "payment-svc",
+      "kind": "saturation",
+      "threshold": 0.85,
+      "window_seconds": 300,
+      "baseline": 0.4
+    },
+    {
+      "service": "fraud-svc",
+      "kind": "latency",
+      "threshold": 700,
+      "window_seconds": 300,
+      "baseline": 180
+    },
+    {
+      "service": "fraud-svc",
+      "kind": "saturation",
+      "threshold": 0.85,
+      "window_seconds": 300,
+      "baseline": 0.38
+    },
+    {
+      "service": "ledger-svc",
+      "kind": "saturation",
+      "threshold": 0.85,
+      "window_seconds": 300,
+      "baseline": 0.35
+    }
+  ],
+  "configs": [
+    {
+      "service": "checkout-svc",
+      "key": "db_pool_size",
+      "value": 20
+    },
+    {
+      "service": "fraud-svc",
+      "key": "db_pool_size",
+      "value": 20
+    },
+    {
+      "service": "checkout-svc",
+      "key": "express_checkout_enabled",
+      "value": false
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "f1-checkout-base",
+      "family_id": "F1_BAD_DEPLOY",
+      "variant_id": "base",
+      "title": "Checkout 5xx regression after canary",
+      "severity": "SEV1",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 3600,
+      "failed_orders": 6,
+      "fault": {
+        "bad_version": "1.5.0",
+        "error_rate": 0.18,
+        "burn_rate": 18.0
+      }
+    },
+    {
+      "scenario_id": "f2-checkout-base",
+      "family_id": "F2_POOL_EXHAUSTION",
+      "variant_id": "base",
+      "title": "Checkout database connection pool exhausted",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 10800,
+      "failed_orders": 4,
+      "fault": {
+        "p99_ms": 4200,
+        "burn_rate": 9.0
+      }
+    },
+    {
+      "scenario_id": "f3-cache-base",
+      "family_id": "F3_CACHE_OUTAGE",
+      "variant_id": "base",
+      "title": "Checkout cache timeout cascade",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 18000,
+      "failed_orders": 5,
+      "fault": {
+        "dependency_key": "checkout-cache",
+        "failed_service": "redis-cluster-v2",
+        "availability": 0.91,
+        "burn_rate": 12.0
+      }
+    },
+    {
+      "scenario_id": "f4-saturation-base",
+      "family_id": "F4_TRAFFIC_SATURATION",
+      "variant_id": "base",
+      "title": "Flash-sale traffic saturates checkout",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 25200,
+      "failed_orders": 5,
+      "fault": {
+        "utilization": 0.98,
+        "burn_rate": 10.0
+      }
+    },
+    {
+      "scenario_id": "f5-retry-storm-base",
+      "family_id": "F5_RETRY_STORM",
+      "variant_id": "base",
+      "title": "Checkout retry storm amplifies a provider blip",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 32400,
+      "failed_orders": 5,
+      "fault": {
+        "p99_ms": 5100,
+        "burn_rate": 11.0
+      }
+    },
+    {
+      "scenario_id": "f6-memory-leak-base",
+      "family_id": "F6_MEMORY_LEAK",
+      "variant_id": "base",
+      "title": "Fraud worker memory leak reaches OOM pressure",
+      "severity": "SEV3",
+      "target_service": "fraud-svc",
+      "inject_at_seconds": 39600,
+      "failed_orders": 3,
+      "fault": {
+        "memory_utilization": 0.97,
+        "burn_rate": 7.0
+      }
+    },
+    {
+      "scenario_id": "f7-config-base",
+      "family_id": "F7_CONFIG_REGRESSION",
+      "variant_id": "base",
+      "title": "Express checkout flag causes validation errors",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 46800,
+      "failed_orders": 5,
+      "fault": {
+        "key": "express_checkout_enabled",
+        "bad_value": true,
+        "error_rate": 0.12,
+        "burn_rate": 13.0
+      }
+    },
+    {
+      "scenario_id": "f8-datastore-base",
+      "family_id": "F8_DATASTORE_FAILOVER",
+      "variant_id": "base",
+      "title": "Orders datastore primary stops accepting writes",
+      "severity": "SEV1",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 54000,
+      "failed_orders": 8,
+      "fault": {
+        "dependency_key": "checkout-orders",
+        "failed_service": "orders-db",
+        "availability": 0.82,
+        "burn_rate": 22.0
+      }
+    },
+    {
+      "scenario_id": "f9-provider-base",
+      "family_id": "F9_PAYMENT_PROVIDER_OUTAGE",
+      "variant_id": "base",
+      "title": "Primary payment provider rejects authorizations",
+      "severity": "SEV1",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 61200,
+      "failed_orders": 9,
+      "fault": {
+        "dependency_key": "payment-provider",
+        "failed_service": "payment-provider-primary",
+        "availability": 0.74,
+        "burn_rate": 24.0
+      }
+    },
+    {
+      "scenario_id": "f10-novel-base",
+      "family_id": "F10_NOVEL",
+      "variant_id": "base",
+      "title": "Unknown clock skew pattern affects checkout",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 68400,
+      "failed_orders": 4,
+      "fault": {
+        "p99_ms": 2800,
+        "burn_rate": 6.0
+      }
+    },
+    {
+      "scenario_id": "f1-payment-recurrence",
+      "family_id": "F1_BAD_DEPLOY",
+      "variant_id": "payment-surface",
+      "title": "Payment authorization errors after deploy",
+      "severity": "SEV1",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 90000,
+      "failed_orders": 7,
+      "fault": {
+        "bad_version": "2.4.0",
+        "error_rate": 0.14,
+        "burn_rate": 16.0
+      }
+    },
+    {
+      "scenario_id": "f2-fraud-recurrence",
+      "family_id": "F2_POOL_EXHAUSTION",
+      "variant_id": "fraud-cascade",
+      "title": "Fraud checks time out from pool pressure",
+      "severity": "SEV2",
+      "target_service": "fraud-svc",
+      "inject_at_seconds": 97200,
+      "failed_orders": 4,
+      "fault": {
+        "p99_ms": 3600,
+        "burn_rate": 8.0
+      }
+    },
+    {
+      "scenario_id": "f3-cache-recurrence",
+      "family_id": "F3_CACHE_OUTAGE",
+      "variant_id": "recurrence",
+      "title": "Recurring checkout cache timeout cascade",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 104400,
+      "failed_orders": 5,
+      "fault": {
+        "dependency_key": "checkout-cache",
+        "failed_service": "redis-cluster-v2",
+        "availability": 0.92,
+        "burn_rate": 11.0
+      }
+    },
+    {
+      "scenario_id": "f4-saturation-recurrence",
+      "family_id": "F4_TRAFFIC_SATURATION",
+      "variant_id": "payment-surface",
+      "title": "Promotion traffic saturates payment authorization",
+      "severity": "SEV2",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 111600,
+      "failed_orders": 5,
+      "fault": {
+        "utilization": 0.96,
+        "burn_rate": 9.0
+      }
+    },
+    {
+      "scenario_id": "f5-retry-storm-recurrence",
+      "family_id": "F5_RETRY_STORM",
+      "variant_id": "payment-cascade",
+      "title": "Payment retries amplify transient timeouts",
+      "severity": "SEV2",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 118800,
+      "failed_orders": 5,
+      "fault": {
+        "p99_ms": 4700,
+        "burn_rate": 10.0
+      }
+    },
+    {
+      "scenario_id": "f6-memory-leak-recurrence",
+      "family_id": "F6_MEMORY_LEAK",
+      "variant_id": "ledger-surface",
+      "title": "Ledger worker memory leak causes crashes",
+      "severity": "SEV3",
+      "target_service": "ledger-svc",
+      "inject_at_seconds": 126000,
+      "failed_orders": 3,
+      "fault": {
+        "memory_utilization": 0.95,
+        "burn_rate": 6.0
+      }
+    },
+    {
+      "scenario_id": "f7-config-recurrence",
+      "family_id": "F7_CONFIG_REGRESSION",
+      "variant_id": "recurrence",
+      "title": "Express checkout flag reintroduces validation errors",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 133200,
+      "failed_orders": 5,
+      "fault": {
+        "key": "express_checkout_enabled",
+        "bad_value": true,
+        "error_rate": 0.1,
+        "burn_rate": 11.0
+      }
+    },
+    {
+      "scenario_id": "f8-datastore-recurrence",
+      "family_id": "F8_DATASTORE_FAILOVER",
+      "variant_id": "recurrence",
+      "title": "Orders datastore primary is unavailable again",
+      "severity": "SEV1",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 140400,
+      "failed_orders": 8,
+      "fault": {
+        "dependency_key": "checkout-orders",
+        "failed_service": "orders-db",
+        "availability": 0.84,
+        "burn_rate": 20.0
+      }
+    },
+    {
+      "scenario_id": "f9-provider-recurrence",
+      "family_id": "F9_PAYMENT_PROVIDER_OUTAGE",
+      "variant_id": "recurrence",
+      "title": "Payment provider authorization outage recurs",
+      "severity": "SEV1",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 147600,
+      "failed_orders": 9,
+      "fault": {
+        "dependency_key": "payment-provider",
+        "failed_service": "payment-provider-primary",
+        "availability": 0.77,
+        "burn_rate": 21.0
+      }
+    },
+    {
+      "scenario_id": "f10-novel-recurrence",
+      "family_id": "F10_NOVEL",
+      "variant_id": "different-surface",
+      "title": "Unknown clock skew signature reaches checkout",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 154800,
+      "failed_orders": 4,
+      "fault": {
+        "p99_ms": 2600,
+        "burn_rate": 5.0
+      }
+    },
+    {
+      "scenario_id": "f1-checkout-third",
+      "family_id": "F1_BAD_DEPLOY",
+      "variant_id": "third-occurrence",
+      "title": "Checkout canary produces another 5xx regression",
+      "severity": "SEV1",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 162000,
+      "failed_orders": 6,
+      "fault": {
+        "bad_version": "1.6.0",
+        "error_rate": 0.16,
+        "burn_rate": 17.0
+      }
+    },
+    {
+      "scenario_id": "f2-near-miss-slow-query",
+      "family_id": "F2_POOL_EXHAUSTION",
+      "variant_id": "red-herring-slow-query",
+      "title": "Checkout latency resembles pool pressure but query plan is slow",
+      "severity": "SEV3",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 169200,
+      "failed_orders": 3,
+      "fault": {
+        "near_miss": true,
+        "p99_ms": 3100,
+        "burn_rate": 5.0
+      }
+    },
+    {
+      "scenario_id": "f3-cache-third",
+      "family_id": "F3_CACHE_OUTAGE",
+      "variant_id": "third-occurrence",
+      "title": "Checkout cache timeout cascade returns",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 176400,
+      "failed_orders": 5,
+      "fault": {
+        "dependency_key": "checkout-cache",
+        "failed_service": "redis-cluster-v2",
+        "availability": 0.93,
+        "burn_rate": 10.0
+      }
+    },
+    {
+      "scenario_id": "f4-saturation-third",
+      "family_id": "F4_TRAFFIC_SATURATION",
+      "variant_id": "fraud-surface",
+      "title": "Risk campaign traffic saturates fraud workers",
+      "severity": "SEV2",
+      "target_service": "fraud-svc",
+      "inject_at_seconds": 183600,
+      "failed_orders": 4,
+      "fault": {
+        "utilization": 0.95,
+        "burn_rate": 8.0
+      }
+    },
+    {
+      "scenario_id": "f5-retry-storm-third",
+      "family_id": "F5_RETRY_STORM",
+      "variant_id": "third-occurrence",
+      "title": "Checkout retry storm follows a network blip",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 190800,
+      "failed_orders": 5,
+      "fault": {
+        "p99_ms": 4300,
+        "burn_rate": 9.0
+      }
+    },
+    {
+      "scenario_id": "f6-memory-leak-third",
+      "family_id": "F6_MEMORY_LEAK",
+      "variant_id": "third-occurrence",
+      "title": "Fraud worker leak again reaches OOM pressure",
+      "severity": "SEV3",
+      "target_service": "fraud-svc",
+      "inject_at_seconds": 198000,
+      "failed_orders": 3,
+      "fault": {
+        "memory_utilization": 0.96,
+        "burn_rate": 6.0
+      }
+    },
+    {
+      "scenario_id": "f7-config-third",
+      "family_id": "F7_CONFIG_REGRESSION",
+      "variant_id": "third-occurrence",
+      "title": "Express checkout flag causes errors for a third time",
+      "severity": "SEV2",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 205200,
+      "failed_orders": 5,
+      "fault": {
+        "key": "express_checkout_enabled",
+        "bad_value": true,
+        "error_rate": 0.11,
+        "burn_rate": 12.0
+      }
+    },
+    {
+      "scenario_id": "f8-datastore-third",
+      "family_id": "F8_DATASTORE_FAILOVER",
+      "variant_id": "third-occurrence",
+      "title": "Orders datastore primary again rejects writes",
+      "severity": "SEV1",
+      "target_service": "checkout-svc",
+      "inject_at_seconds": 212400,
+      "failed_orders": 8,
+      "fault": {
+        "dependency_key": "checkout-orders",
+        "failed_service": "orders-db",
+        "availability": 0.85,
+        "burn_rate": 19.0
+      }
+    },
+    {
+      "scenario_id": "f9-provider-third",
+      "family_id": "F9_PAYMENT_PROVIDER_OUTAGE",
+      "variant_id": "third-occurrence",
+      "title": "Primary provider authorization outage returns",
+      "severity": "SEV1",
+      "target_service": "payment-svc",
+      "inject_at_seconds": 219600,
+      "failed_orders": 9,
+      "fault": {
+        "dependency_key": "payment-provider",
+        "failed_service": "payment-provider-primary",
+        "availability": 0.78,
+        "burn_rate": 20.0
+      }
+    }
+  ]
+}

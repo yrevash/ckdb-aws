@@ -1,0 +1,279 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import math
+from pathlib import Path
+import re
+from typing import Any
+
+from postmortem_sim.models import IncidentObservation
+
+from .contracts import ActionPlan, ResponderDecision, RetrievalHit
+
+
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
+DEFAULT_MATCH_THRESHOLD = 0.15
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+STOP_WORDS = {
+    "a",
+    "after",
+    "and",
+    "are",
+    "checkout",
+    "causes",
+    "error",
+    "errors",
+    "incident",
+    "is",
+    "payment",
+    "service",
+    "the",
+    "to",
+    "with",
+}
+
+
+def tokenize(text: str) -> frozenset[str]:
+    return frozenset(TOKEN_RE.findall(text.lower())) - STOP_WORDS
+
+
+@dataclass(frozen=True)
+class MemoryRecord:
+    memory_id: str
+    family_id: str
+    text: str
+    actions: tuple[ActionPlan, ...]
+
+
+class ProceduralMemoryResponder:
+    name = "with_memory"
+
+    def __init__(
+        self,
+        corpus_path: Path | str = FIXTURE_ROOT / "memory_corpus.json",
+        *,
+        retrieval_k: int = 10,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+    ) -> None:
+        payload = json.loads(Path(corpus_path).read_text())
+        self.records = tuple(
+            MemoryRecord(
+                memory_id=item["memory_id"],
+                family_id=item["family_id"],
+                text=item["text"],
+                actions=tuple(
+                    ActionPlan(
+                        action_type=action["action_type"],
+                        target_service=action["target_service"],
+                        params=action.get("params", {}),
+                    )
+                    for action in item.get("actions", [])
+                ),
+            )
+            for item in payload["memories"]
+        )
+        self.retrieval_k = retrieval_k
+        self.match_threshold = match_threshold
+        self._memory_use_count: dict[str, int] = {}
+
+    def decide(self, observation: IncidentObservation) -> ResponderDecision:
+        query = tokenize(f"{observation.title} {observation.signal}")
+        ranked = sorted(
+            (
+                (
+                    self._similarity(query, tokenize(record.text)),
+                    record.memory_id,
+                    record,
+                )
+                for record in self.records
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        top = ranked[: self.retrieval_k]
+        hits = tuple(
+            RetrievalHit(memory_id=memory_id, score=round(score, 6))
+            for score, memory_id, _ in top
+        )
+        retrieval_tokens = sum(len(tokenize(record.text)) for _, _, record in top)
+        base_tokens = 220 + len(query) * 3 + retrieval_tokens
+
+        inapplicable_memory_ids: set[str] = set()
+        if "pool health confirmed" in observation.signal.lower():
+            inapplicable_memory_ids.add("mem-f2-pool")
+        candidate = next(
+            (
+                item
+                for item in top
+                if item[1] not in inapplicable_memory_ids
+                and item[0] >= self.match_threshold
+                and item[2].actions
+            ),
+            None,
+        )
+
+        if candidate is None:
+            return ResponderDecision(
+                actions=(
+                    ActionPlan(
+                        action_type="no_op_page_human",
+                        target_service=observation.service,
+                        params={},
+                    ),
+                ),
+                retrieved=hits,
+                token_proxy=base_tokens + 80,
+                abstained=True,
+                decision_seconds=120,
+            )
+
+        prior_uses = self._memory_use_count.get(candidate[1], 0)
+        self._memory_use_count[candidate[1]] = prior_uses + 1
+        decision_seconds = (180, 60, 0)[min(prior_uses, 2)]
+        rendered = tuple(
+            self._render_action(action, observation)
+            for action in candidate[2].actions
+        )
+        return ResponderDecision(
+            actions=rendered,
+            retrieved=hits,
+            token_proxy=base_tokens + 70 * len(rendered),
+            authorized_memory_id=candidate[1],
+            decision_seconds=decision_seconds,
+        )
+
+    @staticmethod
+    def _similarity(
+        query_tokens: frozenset[str], memory_tokens: frozenset[str]
+    ) -> float:
+        if not query_tokens or not memory_tokens:
+            return 0.0
+        return len(query_tokens & memory_tokens) / math.sqrt(
+            len(query_tokens) * len(memory_tokens)
+        )
+
+    @staticmethod
+    def _render_action(
+        action: ActionPlan, observation: IncidentObservation
+    ) -> ActionPlan:
+        target = (
+            observation.service
+            if action.target_service == "$incident.service"
+            else action.target_service
+        )
+        params: dict[str, Any] = {}
+        for key, value in action.params.items():
+            if value == "$incident.previous_stable_version":
+                value = observation.previous_stable_version
+            params[key] = value
+        return ActionPlan(action.action_type, target, params)
+
+
+class ColdStartResponder:
+    """Signal-driven baseline with no persistent incident memory."""
+
+    name = "cold_start"
+
+    def decide(self, observation: IncidentObservation) -> ResponderDecision:
+        signal = observation.signal.lower()
+        target = observation.service
+        wrong_scale = ActionPlan(
+            "scale_service",
+            target,
+            {"capacity_units": 12},
+        )
+        wrong_restart = ActionPlan("restart_service", target, {})
+
+        if "after deploy" in signal:
+            actions = (
+                wrong_scale,
+                ActionPlan(
+                    "rollback_deploy",
+                    target,
+                    {"target_version": observation.previous_stable_version},
+                ),
+            )
+        elif "too many connections" in signal:
+            actions = (
+                wrong_scale,
+                ActionPlan(
+                    "set_config",
+                    target,
+                    {"key": "db_pool_size", "value": 80},
+                ),
+                ActionPlan("restart_service", target, {}),
+            )
+        elif "cache timeout cascade" in signal:
+            actions = (
+                wrong_restart,
+                ActionPlan(
+                    "failover_dependency",
+                    target,
+                    {
+                        "dependency_key": "checkout-cache",
+                        "to_service": "redis-cluster-v2-replica",
+                    },
+                ),
+            )
+        elif "traffic spike saturated" in signal:
+            actions = (
+                ActionPlan("scale_service", target, {"capacity_units": 8}),
+                ActionPlan(
+                    "throttle_traffic", target, {"traffic_percent": 75}
+                ),
+            )
+        elif "retry storm" in signal:
+            actions = (
+                wrong_scale,
+                ActionPlan(
+                    "throttle_traffic", target, {"traffic_percent": 60}
+                ),
+            )
+        elif "memory leak" in signal:
+            actions = (ActionPlan("restart_service", target, {}),)
+        elif "config flag" in signal:
+            actions = (
+                wrong_scale,
+                ActionPlan(
+                    "set_config",
+                    target,
+                    {"key": "express_checkout_enabled", "value": False},
+                ),
+            )
+        elif "datastore primary" in signal:
+            actions = (
+                wrong_restart,
+                ActionPlan(
+                    "failover_dependency",
+                    target,
+                    {
+                        "dependency_key": "checkout-orders",
+                        "to_service": "orders-db-replica",
+                    },
+                ),
+            )
+        elif "payment provider" in signal:
+            actions = (
+                wrong_restart,
+                ActionPlan(
+                    "failover_dependency",
+                    target,
+                    {
+                        "dependency_key": "payment-provider",
+                        "to_service": "payment-provider-secondary",
+                    },
+                ),
+                ActionPlan(
+                    "throttle_traffic", target, {"traffic_percent": 50}
+                ),
+            )
+        else:
+            actions = (ActionPlan("no_op_page_human", target, {}),)
+
+        query_tokens = len(tokenize(f"{observation.title} {observation.signal}"))
+        return ResponderDecision(
+            actions=actions,
+            token_proxy=650 + query_tokens * 5 + len(actions) * 120,
+            abstained=actions[-1].action_type == "no_op_page_human",
+            decision_seconds=240,
+        )
