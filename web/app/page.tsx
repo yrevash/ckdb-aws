@@ -1,5 +1,5 @@
-import { IncidentConsole } from "@/components/incident-console";
+import { PostmortemConsole } from "@/components/postmortem-console";
 
 export default function Home() {
-  return <IncidentConsole />;
+  return <PostmortemConsole />;
 }
