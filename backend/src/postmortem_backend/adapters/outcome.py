@@ -8,6 +8,7 @@ from uuid import UUID
 
 from ..domain import OutcomeCommand, OutcomeKind, OutcomeResult
 from ..errors import OutcomeConflict, OutcomeRecordingError, ProvenanceError
+from ..guardrails.roles import require_writer
 from .cockroach import ConnectionProvider
 
 
@@ -151,6 +152,8 @@ class CockroachOutcomeStore:
         *,
         max_serialization_retries: int = 3,
     ) -> None:
+        # The outcome write path is a writer-only path (R7/T2).
+        require_writer(connection_provider)
         self._connection_provider = connection_provider
         self._max_serialization_retries = max_serialization_retries
 

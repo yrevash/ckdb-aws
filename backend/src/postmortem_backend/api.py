@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -16,7 +17,13 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .domain import IncidentSignal, OutcomeCommand, OutcomeKind
-from .errors import PostmortemError
+from .errors import (
+    InputValidationError,
+    PostmortemError,
+    PromptInjectionDetected,
+    WebhookAuthenticationError,
+)
+from .guardrails.validation import WebhookAuthenticator, validate_changefeed_body
 from .runtime import Runtime, build_runtime
 from .transport import console_region, sse_message
 
@@ -30,6 +37,7 @@ class RespondRequest(BaseModel):
     service_tags: list[str] = Field(default_factory=list, max_length=50)
     metadata: dict[str, object] = Field(default_factory=dict)
     approved: bool = False
+    approved_by: str | None = Field(default=None, max_length=254)
     cold_start: bool = False
 
 
@@ -47,6 +55,7 @@ def create_app(
 ) -> FastAPI:
     selected_settings = settings or Settings.from_env()
     selected_runtime = runtime or build_runtime(selected_settings)
+    webhook_auth = WebhookAuthenticator(selected_settings.changefeed_webhook_secret)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -65,6 +74,33 @@ def create_app(
         allow_methods=["GET", "POST"],
         allow_headers=["content-type"],
     )
+
+    @app.exception_handler(WebhookAuthenticationError)
+    async def webhook_auth_error(
+        _: Request, exc: WebhookAuthenticationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=401,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.exception_handler(InputValidationError)
+    async def input_validation_error(
+        _: Request, exc: InputValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.exception_handler(PromptInjectionDetected)
+    async def prompt_injection_error(
+        _: Request, exc: PromptInjectionDetected
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
 
     @app.exception_handler(PostmortemError)
     async def postmortem_error(_: Request, exc: PostmortemError) -> JSONResponse:
@@ -108,8 +144,30 @@ def create_app(
             service_tags=tuple(body.service_tags),
             metadata={**body.metadata, "cold_start": body.cold_start},
         )
-        result = selected_runtime.responder.handle(signal, approved=body.approved)
+        result = selected_runtime.responder.handle(
+            signal, approved=body.approved, approver=body.approved_by
+        )
         return jsonable_encoder(asdict(result))
+
+    @app.post("/v1/changefeed")
+    async def changefeed(request: Request) -> object:
+        # Authenticated changefeed ingest (R9): CockroachDB's webhook sink signs
+        # the raw body with a shared secret; verify HMAC-SHA256 before parsing,
+        # then structurally validate the envelope. Fails closed on a missing/bad
+        # signature (401) or a malformed body (400).
+        raw = await request.body()
+        signature = request.headers.get(
+            "X-Postmortem-Signature"
+        ) or request.headers.get("X-Signature")
+        webhook_auth.authenticate(raw, signature)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise InputValidationError("Changefeed body was not valid JSON.") from exc
+        if not isinstance(data, dict):
+            raise InputValidationError("Changefeed body must be a JSON object.")
+        envelope = validate_changefeed_body(data)
+        return {"accepted": len(envelope.payload)}
 
     @app.get("/v1/incidents/{incident_id}")
     def incident(incident_id: UUID) -> object:

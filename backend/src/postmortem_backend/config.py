@@ -27,6 +27,16 @@ class Settings:
     mcp_token: str | None
     recall_backend: str = "mcp"
     cold_start: bool = False
+    # Optional per-role DSNs so recall dials postmortem_reader and the act/outcome
+    # path dials postmortem_writer (charter R7/T2). When unset, database_url is
+    # used for both, but the code still tags each pool with its role so a future
+    # cross-wiring fails in-process (see guardrails.roles). Keep both in Secrets
+    # Manager in deployed environments.
+    reader_database_url: str | None = None
+    writer_database_url: str | None = None
+    # Shared secret for authenticating the CockroachDB changefeed webhook
+    # (HMAC-SHA256 over the raw body). Required to accept webhook ingest.
+    changefeed_webhook_secret: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +88,15 @@ class Settings:
                 database_url=os.getenv("POSTMORTEM_DATABASE_URL") or None,
                 mcp_url=os.getenv("POSTMORTEM_MCP_URL") or None,
                 mcp_token=os.getenv("POSTMORTEM_MCP_TOKEN") or None,
+                reader_database_url=(
+                    os.getenv("POSTMORTEM_READER_DATABASE_URL") or None
+                ),
+                writer_database_url=(
+                    os.getenv("POSTMORTEM_WRITER_DATABASE_URL") or None
+                ),
+                changefeed_webhook_secret=(
+                    os.getenv("POSTMORTEM_CHANGEFEED_WEBHOOK_SECRET") or None
+                ),
             )
         except (ValueError, TypeError) as exc:
             raise ConfigurationError(f"Invalid Postmortem configuration: {exc}") from exc

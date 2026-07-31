@@ -167,12 +167,25 @@ class ResponderTests(unittest.TestCase):
         )
 
     def test_approved_high_risk_action_commits(self) -> None:
-        service, store, _ = self.make_service(approval=True)
+        service, store, events = self.make_service(approval=True)
 
-        result = service.handle(signal(), approved=True)
+        result = service.handle(
+            signal(), approved=True, approver="sre@granthvani.com"
+        )
 
         self.assertIsNotNone(result.remediation)
         self.assertEqual(store.commit_count, 1)
+        # The destructive-action gate records the named approver on the
+        # transaction event (R5/R10 -- approval + actor are auditable).
+        started = next(
+            event
+            for event in events.history(INCIDENT_ID)
+            if event.type is EventType.TRANSACTION_STARTED
+        )
+        authorization = started.data["authorization"]
+        self.assertTrue(authorization["high_blast_radius"])
+        self.assertTrue(authorization["approved"])
+        self.assertEqual(authorization["approver"], "sre@granthvani.com")
 
     def test_no_memory_escalates_without_mutation(self) -> None:
         events = EventBroker()

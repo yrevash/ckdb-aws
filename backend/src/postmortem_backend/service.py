@@ -18,6 +18,13 @@ from .domain import (
     RecallQuery,
     ResponseResult,
 )
+from .guardrails.allowlist import (
+    authorize_action,
+    enforce_tool_allowlist,
+    resolve_decision_tool,
+)
+from .guardrails.injection import sanitize_signal
+from .guardrails.provenance import require_grounded_action
 from .ports import (
     AtomicRemediationPort,
     EmbeddingPort,
@@ -74,8 +81,18 @@ class ResponderService:
         self._events = events
         self.registry = registry or IncidentRegistry()
 
-    def handle(self, signal: IncidentSignal, *, approved: bool = False) -> ResponseResult:
+    def handle(
+        self,
+        signal: IncidentSignal,
+        *,
+        approved: bool = False,
+        approver: str | None = None,
+    ) -> ResponseResult:
         transaction_started = False
+        # Prompt-injection defense (T1/R6): every untrusted free-text field of the
+        # inbound signal is scrubbed + screened before it can reach recall or the
+        # model. An injection attempt fails the turn closed here.
+        signal = sanitize_signal(signal)
         self.registry.received(signal)
         self._event(
             signal,
@@ -222,6 +239,14 @@ class ResponderService:
             if decision.kind is DecisionKind.REMEDIATE and decision.command is not None:
                 command = replace(decision.command, approved=approved)
                 decision = replace(decision, command=command)
+                # Tool allowlist (R3): the agent may only drive an allowlisted tool.
+                enforce_tool_allowlist(resolve_decision_tool(decision.kind))
+                # Provenance gate (R4): reject an ungrounded action BEFORE execution;
+                # the citation must resolve to a memory Recall actually surfaced.
+                require_grounded_action(
+                    command,
+                    recalled_ids=[item.memory_id for item in memory.all_candidates],
+                )
                 self._event(
                     signal,
                     EventType.ACTION_PROPOSED,
@@ -258,6 +283,15 @@ class ResponderService:
                         },
                     )
                 else:
+                    # Destructive / high-blast-radius gate (R5): refuse an
+                    # irreversible action without explicit, named human approval;
+                    # record the authorization decision (approver + reason) so the
+                    # audit trail attributes every executed high-risk action.
+                    approval_record = authorize_action(
+                        command,
+                        human_approved=command.approved,
+                        approver=approver,
+                    )
                     self._event(
                         signal,
                         EventType.TRANSACTION_STARTED,
@@ -266,6 +300,7 @@ class ResponderService:
                         {
                             "action": command.action.value,
                             "transaction_id": str(command.incident_id),
+                            "authorization": approval_record.to_dict(),
                         },
                     )
                     transaction_started = True

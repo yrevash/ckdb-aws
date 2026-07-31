@@ -22,6 +22,7 @@ from .adapters.mcp import ManagedMCPRecallAdapter, StreamableHttpMCPTransport
 from .adapters.outcome import CockroachOutcomeStore
 from .adapters.recall import CockroachRecallAdapter
 from .config import Settings
+from .guardrails.roles import DatabaseRole, RoleScopedProvider
 from .events import EventBroker
 from .service import OutcomeService, ResponderService
 from .recall import ColdStartRecallAdapter
@@ -82,9 +83,28 @@ def build_runtime(settings: Settings) -> Runtime:
             region=settings.aws_region,
             model_id=settings.reasoning_model_id,
         )
-    pool = PsycopgPoolProvider(settings.database_url or "")
+    # Role-scoped SQL identities (charter R7/T2): the act/outcome path dials the
+    # scoped writer, the recall path dials the read-only reader. When a single
+    # DSN is configured both wrap the same underlying pool, but each carries its
+    # role so the adapters refuse a cross-wiring in-process (guardrails.roles).
+    writer_dsn = settings.writer_database_url or settings.database_url or ""
+    reader_dsn = settings.reader_database_url or settings.database_url or ""
+    writer_pool = PsycopgPoolProvider(writer_dsn)
+    if reader_dsn == writer_dsn:
+        reader_raw = writer_pool
+        resources: tuple[Any, ...] = (writer_pool,)
+    else:
+        reader_raw = PsycopgPoolProvider(reader_dsn)
+        resources = (writer_pool, reader_raw)
+    writer_provider = RoleScopedProvider(
+        writer_pool, DatabaseRole.WRITER, identity="postmortem_agent_writer"
+    )
+    reader_provider = RoleScopedProvider(
+        reader_raw, DatabaseRole.READER, identity="postmortem_agent_reader"
+    )
+
     if settings.recall_backend == "sql":
-        recall = CockroachRecallAdapter(pool)
+        recall = CockroachRecallAdapter(reader_provider)
     else:
         transport = StreamableHttpMCPTransport(
             settings.mcp_url or "",
@@ -97,12 +117,12 @@ def build_runtime(settings: Settings) -> Runtime:
         embedder=embedder,
         recall=recall,
         reasoner=reasoner,
-        remediation=CockroachAtomicRemediationStore(pool),
+        remediation=CockroachAtomicRemediationStore(writer_provider),
         events=events,
     )
     outcomes = OutcomeService(
         embedder=embedder,
-        outcomes=CockroachOutcomeStore(pool),
+        outcomes=CockroachOutcomeStore(writer_provider),
         events=events,
     )
     return Runtime(
@@ -110,5 +130,5 @@ def build_runtime(settings: Settings) -> Runtime:
         responder=responder,
         outcomes=outcomes,
         events=events,
-        resources=(pool,),
+        resources=resources,
     )

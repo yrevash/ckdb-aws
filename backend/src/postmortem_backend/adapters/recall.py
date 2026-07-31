@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from ..domain import MemoryCandidate, MemoryKind, RecallBundle, RecallQuery
 from ..errors import RecallError
+from ..guardrails.roles import require_reader
 from ..recall import RecallPolicy, RecallRanker
 from .cockroach import ConnectionProvider
 
@@ -236,6 +237,10 @@ class CockroachRecallAdapter:
         *,
         policy: RecallPolicy | None = None,
     ) -> None:
+        # Recall is a read-only path (R7): refuse a writer-scoped identity so the
+        # recall surface structurally cannot hold write grants ("vice-versa" of
+        # the act/reader split). Unscoped providers pass through.
+        require_reader(connection_provider)
         self._connection_provider = connection_provider
         self._ranker = RecallRanker(policy)
 

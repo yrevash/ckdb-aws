@@ -9,6 +9,7 @@ from aws_cdk import (
     aws_apigatewayv2 as apigwv2,
     aws_apigatewayv2_integrations as apigwv2_integrations,
     aws_cloudwatch as cloudwatch,
+    aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as event_targets,
     aws_iam as iam,
@@ -19,11 +20,20 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from .stacks import SharedStack
+from .stacks import (
+    EMBEDDING_MODEL_ID,
+    SharedStack,
+    bedrock_invoke_statements,
+)
 
 
 class ConsolidationStack(Stack):
-    """Changefeed → FIFO SQS → sleep-time procedural-memory consolidation."""
+    """Changefeed → FIFO SQS → sleep-time procedural-memory consolidation.
+
+    Both Lambdas run in isolated subnets (no internet egress), the queues and
+    logs are CMK-encrypted and TLS-only, and the consolidator's Bedrock grant is
+    scoped to the exact distillation/embedding models plus the shared guardrail.
+    """
 
     def __init__(
         self,
@@ -43,11 +53,17 @@ class ConsolidationStack(Stack):
             or "us.anthropic.claude-3-5-haiku-20241022-v1:0"
         )
 
+        vpc_subnets = ec2.SubnetSelection(
+            subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
+        )
+
         dead_letter_queue = sqs.Queue(
             self,
             "ConsolidationDeadLetterQueue",
             fifo=True,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            encryption=sqs.QueueEncryption.KMS,
+            encryption_master_key=shared.key,
+            enforce_ssl=True,
             retention_period=Duration.days(14),
         )
         queue = sqs.Queue(
@@ -57,7 +73,9 @@ class ConsolidationStack(Stack):
             content_based_deduplication=False,
             deduplication_scope=sqs.DeduplicationScope.QUEUE,
             fifo_throughput_limit=sqs.FifoThroughputLimit.PER_QUEUE,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            encryption=sqs.QueueEncryption.KMS,
+            encryption_master_key=shared.key,
+            enforce_ssl=True,
             retention_period=Duration.days(7),
             visibility_timeout=Duration.minutes(60),
             dead_letter_queue=sqs.DeadLetterQueue(
@@ -70,6 +88,7 @@ class ConsolidationStack(Stack):
             self,
             "ReceiverLogs",
             retention=logs.RetentionDays.ONE_MONTH,
+            encryption_key=shared.key,
         )
         receiver = lambda_.DockerImageFunction(
             self,
@@ -83,6 +102,8 @@ class ConsolidationStack(Stack):
             memory_size=256,
             reserved_concurrent_executions=5,
             log_group=receiver_logs,
+            vpc=shared.vpc,
+            vpc_subnets=vpc_subnets,
             environment={
                 "CONSOLIDATION_QUEUE_URL": queue.queue_url,
                 "CHANGEFEED_WEBHOOK_SECRET_ARN": (
@@ -90,6 +111,8 @@ class ConsolidationStack(Stack):
                 ),
             },
         )
+        # Least privilege: send to the one queue, read the one secret. No Bedrock,
+        # no DB write, no wildcards.
         queue.grant_send_messages(receiver)
         shared.changefeed_webhook_secret.grant_read(receiver)
 
@@ -97,6 +120,7 @@ class ConsolidationStack(Stack):
             self,
             "ConsolidatorLogs",
             retention=logs.RetentionDays.ONE_MONTH,
+            encryption_key=shared.key,
         )
         worker = lambda_.DockerImageFunction(
             self,
@@ -110,6 +134,9 @@ class ConsolidationStack(Stack):
             memory_size=1024,
             reserved_concurrent_executions=1,
             log_group=worker_logs,
+            vpc=shared.vpc,
+            vpc_subnets=vpc_subnets,
+            security_groups=[shared.crdb_security_group],
             environment={
                 "ARTIFACTS_BUCKET": shared.artifacts.bucket_name,
                 "CONSOLIDATION_DATABASE_SECRET_ARN": (
@@ -117,10 +144,14 @@ class ConsolidationStack(Stack):
                 ),
                 "CONSOLIDATION_MODEL_MODE": consolidation_model_mode,
                 "CONSOLIDATION_MODEL_ID": model_id,
-                "CONSOLIDATION_EMBEDDING_MODEL_ID": (
-                    "amazon.titan-embed-text-v2:0"
-                ),
+                "CONSOLIDATION_EMBEDDING_MODEL_ID": EMBEDDING_MODEL_ID,
                 "RUNBOOK_REINFORCEMENTS_TO_ACTIVATE": "2",
+                # Guardrail screens the distillation output (R6).
+                "POSTMORTEM_GUARDRAIL_ID": shared.guardrail.attr_guardrail_id,
+                "POSTMORTEM_GUARDRAIL_VERSION": (
+                    shared.guardrail_version.attr_version
+                ),
+                "POSTMORTEM_DB_SSLMODE": "verify-full",
             },
         )
         worker.add_event_source(
@@ -132,17 +163,13 @@ class ConsolidationStack(Stack):
         )
         shared.artifacts.grant_read_write(worker)
         shared.consolidator_secret.grant_read(worker)
-        worker.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:InvokeModel"],
-                resources=["*"],
-                conditions={
-                    "StringEquals": {
-                        "aws:RequestedRegion": self.region,
-                    }
-                },
-            )
-        )
+        for statement in bedrock_invoke_statements(
+            self.region,
+            self.account,
+            [model_id, EMBEDDING_MODEL_ID],
+            shared.guardrail_arn,
+        ):
+            worker.add_to_role_policy(statement)
 
         webhook = apigwv2.HttpApi(
             self,
@@ -167,7 +194,9 @@ class ConsolidationStack(Stack):
         scheduler_dead_letter_queue = sqs.Queue(
             self,
             "NightlyConsolidationDeadLetterQueue",
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            encryption=sqs.QueueEncryption.KMS,
+            encryption_master_key=shared.key,
+            enforce_ssl=True,
             retention_period=Duration.days(14),
         )
         nightly.add_target(
@@ -189,6 +218,26 @@ class ConsolidationStack(Stack):
             datapoints_to_alarm=1,
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        # Security-relevant alarms (charter principle 12): a spike in receiver
+        # errors is the signature of forged/unauthenticated webhook attempts.
+        receiver_error_alarm = cloudwatch.Alarm(
+            self,
+            "ReceiverErrorAlarm",
+            metric=receiver.metric_errors(period=Duration.minutes(5)),
+            threshold=5,
+            evaluation_periods=1,
+            datapoints_to_alarm=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        consolidator_error_alarm = cloudwatch.Alarm(
+            self,
+            "ConsolidatorErrorAlarm",
+            metric=worker.metric_errors(period=Duration.minutes(5)),
+            threshold=3,
+            evaluation_periods=1,
+            datapoints_to_alarm=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
 
         CfnOutput(
             self,
@@ -198,3 +247,13 @@ class ConsolidationStack(Stack):
         CfnOutput(self, "ConsolidationQueueArn", value=queue.queue_arn)
         CfnOutput(self, "ConsolidationDlqArn", value=dead_letter_queue.queue_arn)
         CfnOutput(self, "ConsolidationDlqAlarmArn", value=dlq_alarm.alarm_arn)
+        CfnOutput(
+            self,
+            "ReceiverErrorAlarmArn",
+            value=receiver_error_alarm.alarm_arn,
+        )
+        CfnOutput(
+            self,
+            "ConsolidatorErrorAlarmArn",
+            value=consolidator_error_alarm.alarm_arn,
+        )

@@ -16,6 +16,7 @@ from ..errors import (
     ProvenanceError,
     UnsupportedAction,
 )
+from ..guardrails.roles import require_writer
 
 
 REMEDIATE_AND_RECORD_SQL = """
@@ -153,6 +154,10 @@ class CockroachAtomicRemediationStore:
         *,
         max_serialization_retries: int = 3,
     ) -> None:
+        # Structural least-privilege (R7/T2): the act path can only be wired to a
+        # write-capable identity. A reader-scoped pool is refused here, before any
+        # statement runs. Unscoped providers (tests/local) pass through.
+        require_writer(connection_provider)
         self._connection_provider = connection_provider
         self._max_serialization_retries = max_serialization_retries
 

@@ -2,6 +2,7 @@
 from aws_cdk import App, Environment
 
 from postmortem_infra.consolidation_stack import ConsolidationStack
+from postmortem_infra.security_stack import SecurityStack
 from postmortem_infra.stacks import AppStack, SharedStack
 
 
@@ -10,6 +11,8 @@ environment = Environment(
     account=app.node.try_get_context("account"),
     region=app.node.try_get_context("region") or "us-east-1",
 )
+
+SecurityStack(app, "PostmortemSecurity", env=environment)
 
 shared = SharedStack(app, "PostmortemShared", env=environment)
 AppStack(
