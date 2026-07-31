@@ -74,7 +74,9 @@ The heart. Contains:
   two agents — one **with memory**, one **cold-start** (no learned memory) — and measures the
   difference (MTTR, recall@k, wrong actions, orders saved, temporal-validity). Emits a machine-readable
   scorecard (`evaluation/reports/phase2.json`).
-- **Why?** "Memory helps" is a claim; this turns it into numbers (−63.6% MTTR, etc.).
+- **Why?** "Memory helps" is a claim; this turns it into *real* numbers — measured retrieval quality
+  today (recall@1 = 0.85 with hard negatives), and the MTTR delta once the real agent runs. No rigged
+  numbers (see `docs/reality/00-reality-charter.md`).
 
 ### `resilience/` — proving RPO=0 (Python)
 - **Probes** (`probes/`) for RPO, RTO, read-your-writes freshness, cross-agent visibility, atomicity;

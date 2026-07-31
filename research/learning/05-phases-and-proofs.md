@@ -18,31 +18,34 @@ agent.
 **Delivered:** full three-stage procedural recall + safety/provenance gates; the changefeed→consolidation
 pipeline; a **10-family** incident corpus with recurrence, near-miss, and novel variants; and the A/B
 evaluation harness.
-**Proof (from `evaluation/reports/phase2.json`):**
+**Proof (honest — from `evaluation/reports/phase2.json`, schema v2). Per the
+[Reality Charter](../../docs/reality/00-reality-charter.md), only real measured numbers appear here;
+decision-quality numbers that need the real reasoning agent are marked pending, not estimated.**
 
-| Metric | Cold-start | With memory | Result |
-|--------|:---------:|:-----------:|--------|
-| Recall@10 | — | **1.0** | (target ≥0.95) ✅ |
-| Median MTTR | 660s | **240s** | **−63.6%** ✅ |
-| Wrong actions | 20 | **0** | ✅ |
-| Failed orders | 197 | 157 | **40 avoided** (~$2,576) ✅ |
-| First-action accuracy | 31% | **100%** | ✅ |
-| Near-miss authorization | — | **0** | (the red-herring is correctly refused) ✅ |
+| Metric | Value | Status |
+|--------|-------|--------|
+| **Retrieval** recall@1 (with 9 hard negatives) | **0.85** | ✅ measured — a close-but-wrong prior case can outrank gold, which is *correct* |
+| Retrieval recall@10 / nDCG@10 | **1.0 / 0.94** | ✅ measured |
+| Near-miss / novel abstention | correctly refused / escalated | ✅ measured |
+| **Agent decision quality** (MTTR, wrong-actions, orders) | **pending real-agent run** | ⏳ needs the real Bedrock agent — a *competent* memoryless baseline ties on the deterministic sim, so no "% faster" is claimed yet |
 
-And it **compounds** across repeat occurrences — median MTTR **300 → 180 → 120s** by 1st/2nd/3rd time
-the agent sees a failure family. That "learning curve" is the proof memory makes the agent *improve*,
-not just *remember*.
+> Earlier drafts showed "−63.6% MTTR / recall@10=1.0 / 40 orders avoided." The audit found those were
+> **baked in** (answer-key corpus + a deliberately-dumb baseline + a hardcoded learning curve). They've
+> been **removed**. The real MTTR delta will be measured when the real agent runs (Aug 1).
 
 ## Phase 3 — Resilience, temporal reasoning, hardening ✅
 Three tracks, all integrated and green under `scripts/verify_phase3.sh`:
 
-- **Track A — Resilience.** A **9-node, 3-region** CockroachDB cluster (in Docker) with `SURVIVE REGION
-  FAILURE`. A scripted **region-kill** with real telemetry: **RPO = 0 rows lost** (every run),
-  **RTO = 0.045–0.099s** (target <10s), read-your-writes staleness **0ms**, cross-agent visibility
-  **0 lag**, atomicity commit-or-abort. (`evaluation/reports/phase3-resilience.json`.)
+- **Track A — Resilience (real failover).** A **9-node, 3-region** cluster with `SURVIVE REGION FAILURE`.
+  Before each kill, leaseholders for the probed tables are **pinned into the region we then kill**
+  (verified via `SHOW RANGES`), so a genuine failover is exercised — the probe *fails* if no real
+  lease handoff occurs. Measured: **RPO = 0 rows lost, content-verified during the outage**;
+  **RTO = 3.5–4.9s** (target <10s; one run included a real serialization-retry during handoff). The
+  earlier "0.045–0.099s" was a fake — it never killed a leaseholder. (`phase3-resilience.json`.)
 - **Track B — Bitemporal & temporal drift.** Facts evolve as transitions, not overwrites; 2 drift
-  families where an old fix becomes wrong. **temporal-validity = 1.0** (the agent applies the
-  *currently-valid* fix, target ≥0.90), **stale-fact applications = 0.**
+  families where an old fix becomes wrong. Temporal-validity is now checked against an **independent**
+  oracle (not the responder's own predicate): the agent applies the *currently-valid* fix,
+  stale-fact applications = 0.
 - **Track C — Hardening.** Audit logging (proven live — even *denied* writes are audited), a
   **BACKUP → corrupt → point-in-time RESTORE** proof, and least-privilege reader/writer/consolidator
   roles. Findings in `docs/HARDENING.md`.

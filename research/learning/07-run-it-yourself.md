@@ -34,14 +34,16 @@ docker compose run --rm db-migrate     # applies bootstrap + migrations
 Green output ("Phase N verification passed.") means the proof reproduced.
 
 ## 3. Read the numbers
-After `verify_phase2.sh`, open **`evaluation/reports/phase2.json`** — the A/B scorecard. Look for:
-- `comparison.median_mttr_reduction_percent` → **63.6**
-- `recall.recall_at_10` → **1.0**
-- `comparison.wrong_actions_avoided` → **20**
-- `learning_curve` → MTTR dropping across occurrences.
+After `verify_phase2.sh`, open **`evaluation/reports/phase2.json`** (schema v2 — honest). Look for:
+- `retrieval.recall_at_1` → **0.85** (real, with 9 hard negatives — *not* 1.0 by construction)
+- `retrieval.ndcg_at_10` → **0.94**, `retrieval.status` → `"measured"`
+- `decision_quality.measured` → **false** (`status: pending_real_agent_run`) — MTTR/wrong-action deltas
+  are **not** shown until the real agent runs; the deterministic arms live under `mechanism_check` and
+  are explicitly *not* a performance claim.
 
-After `verify_phase3.sh`, open **`evaluation/reports/phase3-resilience.json`** — look at `probes.rpo`
-(0 rows lost) and `probes.rto` (seconds), and `node_liveness` (9 → 6 → 9 across the kill).
+After `verify_phase3.sh`, open **`evaluation/reports/phase3-resilience.json`** — `probes.rpo` (0 rows
+lost, content-verified during the outage), `probes.rto` (**3.5–4.9s**, a real failover with leaseholders
+pinned to the killed region), and `node_liveness` (9 → 6 → 9 across the kill).
 
 ## 4. See the console (the UI)
 ```bash

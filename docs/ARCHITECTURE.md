@@ -101,7 +101,8 @@ These are the axes CockroachDB uniquely owns; the build exists to demonstrate th
    cross-region).
 3. **RPO=0 region survival.** Kill a database region live; memory + agent keep working, zero rows
    lost, automatic recovery. *Locally proven today* on the 9-node simulated multi-region cluster
-   (Phase 3 Track A: RPO=0 every run across 4 live runs; RTO 0.045–0.099s, well under the 10s target).
+   (Phase 3 Track A, real failover: RPO=0 content-verified during the outage; RTO **3.5–4.9s** with
+   leaseholders pinned into the killed region so a genuine lease handoff occurs).
    The managed/self-hosted **AWS rehearsal and camera capture are pending Aug 1** — the local proof
    establishes feasibility, not the final recording.
 
@@ -111,7 +112,8 @@ These are the axes CockroachDB uniquely owns; the build exists to demonstrate th
 |---|---|
 | Perceive → recall → reason → act → record loop (fake runtime) | Locally proven (Phase 1, green) |
 | Single-store one-transaction `remediate_and_record` | Locally proven (Phase 1/2, live serializable proof) |
-| With-memory vs. cold-start MTTR delta, recall@k | Locally proven (Phase 2: recall@10=1.0, MTTR −63.6%) |
+| Retrieval quality (real) | Measured (Phase 2 v2: recall@1=0.85 with hard negatives, nDCG@10=0.94) |
+| Agent MTTR delta | Pending real-agent run (no rigged number; Reality Charter R7) |
 | Multi-region RPO=0 / RTO<10s | Locally proven on 9-node simulated cluster (Phase 3 Track A) |
 | Bitemporal fact transitions + temporal-drift | Implemented + individually verified (Phase 3 Track B); integration into `verify_phase3.sh` pending |
 | Audit logging, PITR/backup, least-privilege roles | Implemented + individually verified (Phase 3 Track C); integration pending |

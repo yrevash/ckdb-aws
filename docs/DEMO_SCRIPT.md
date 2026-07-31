@@ -12,7 +12,8 @@ that memory changed what it did — and the memory survived the outage it was fi
 **Recording rules (from 06 §B4):**
 - **Failover is pre-recorded from a REAL region kill**, cut into the video. The kill is genuine; only
   the recording is pre-made (fully legitimate for a video deliverable). **Never gamble a live kill
-  inside a 3-min cut.** The local proof (Phase 3 Track A: RPO=0 every run, RTO 0.045–0.099s) already
+  inside a 3-min cut.** The local proof (Phase 3 Track A, real failover: RPO=0 content-verified during
+  the outage, RTO 3.5–4.9s) already
   establishes this works; Aug 1 is about capturing clean takes with real timestamps.
 - **Deterministic-replay fallback (camera-safe):** the demo runs from a fixed scenario so similarity
   scores, counters, and timings are reproducible take-to-take. If the live cluster misbehaves during

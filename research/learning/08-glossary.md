@@ -5,7 +5,8 @@ Fast definitions for every term and acronym in the project.
 ## Domain / SRE
 - **SRE** — Site Reliability Engineer; the on-call person Postmortem assists/automates.
 - **Incident** — a production problem (outage, latency spike). Table: `incidents`.
-- **MTTR** — Mean Time To Recovery; how long to resolve an incident. Our headline metric (−63.6%).
+- **MTTR** — Mean Time To Recovery; how long to resolve an incident. The target metric — its
+  with-memory-vs-baseline delta is **pending the real-agent run** (no fabricated number is claimed).
 - **Runbook** — a documented procedure to fix a class of problem. Here: learned **procedural memory**.
 - **Canary deploy** — releasing a new version to a small slice first; a common source of incidents.
 - **SLO** — Service Level Objective; the reliability target (e.g. p99 latency < X).

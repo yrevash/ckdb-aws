@@ -84,7 +84,8 @@ episodes, so bad outcomes don't become "best practice."
   ever. CockroachDB guarantees this by writing every commit to a quorum of replicas across regions
   *before* telling the client "done."
 - **RTO** (Recovery Time Objective) = how long until service is restored after a failure. We measured
-  **<10s** (actually 0.045–0.099s) for automatic recovery when a whole region is killed.
+  **<10s** — measured at **3.5–4.9s** under a *real* failover (leaseholders pinned into the killed
+  region first, so an actual lease handoff happens).
 - **SURVIVE REGION FAILURE** = a CockroachDB setting where the data is spread so a full region can die
   and reads *and* writes keep working, automatically, no human failover. We prove this locally on a
   9-node, 3-region cluster.

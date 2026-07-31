@@ -24,7 +24,7 @@ video capture on Aug 1). Accuracy over hype — nothing below claims live AWS is
 |---|---|---|
 | **Agentic Memory Design** | 3 memory types (episodic / semantic-bitemporal / procedural), C-SPANN recall, bitemporal "facts evolve, not overwrite" | Locally proven (Phase 1/2); bitemporal individually verified (Phase 3 Track B) |
 | **Technical Implementation** | Single-store one-transaction `remediate_and_record`; real C-SPANN vectors; MCP read vs. direct-SQL write RBAC split | Locally proven — live serializable proof green (Phase 1/2) |
-| **Real-World Impact** | With-memory vs. cold-start MTTR delta on a recurring SRE stream | Locally proven — recall@10=1.0, median MTTR −63.6% (660→240s), wrong actions 20→0, 40 failed orders avoided |
+| **Real-World Impact** | Retrieval quality (real) + MTTR delta | Measured: recall@1=0.85 (hard negatives), nDCG@10=0.94. **MTTR delta pending the real-agent run** — no rigged number claimed (Reality Charter R7) |
 | **Production Readiness** | RPO=0 / RTO<10s live region survival; audit logging; PITR/backup; least-privilege roles; Guardrails; observability | RPO=0/RTO locally proven on 9-node sim cluster (Track A); audit/PITR/roles individually verified (Track C); Bedrock Guardrails + AWS observability **pending-AWS** |
 | **Creativity & Originality** | Sleep-time consolidation (changefeed→SQS→Lambda distills raw incidents into runbooks) + bitemporal runbook evolution | Consolidation logic tested locally; live pipeline **pending-AWS** |
 
