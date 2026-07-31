@@ -124,6 +124,25 @@ CROSS JOIN record_action
 """
 
 
+# Idempotent-replay lookup: resolve the already-committed action for a given
+# (org_id, idempotency_key) so a duplicate remediation returns the original
+# result rather than a unique-constraint error (audit backend#2 / DB#3).
+REPLAY_LOOKUP_SQL = """
+SELECT
+    ra.action_id,
+    ra.transaction_id,
+    ra.applied_at,
+    ra.memory_ref,
+    (ee.metadata->>'deploy_id')::UUID AS deploy_id
+FROM remediation_actions AS ra
+LEFT JOIN episodic_events AS ee
+  ON ee.event_id = ra.memory_ref AND ee.org_id = ra.org_id
+WHERE ra.org_id = %(org_id)s
+  AND ra.idempotency_key = %(idempotency_key)s
+LIMIT 1
+"""
+
+
 class Cursor(Protocol):
     def execute(self, query: str, params: dict[str, Any] | None = None) -> None: ...
 
@@ -191,10 +210,42 @@ class CockroachAtomicRemediationStore:
             try:
                 return self._execute_once(params)
             except Exception as exc:
-                if _sqlstate(exc) != "40001" or attempt >= self._max_serialization_retries:
+                state = _sqlstate(exc)
+                # An idempotency-key collision (23505) means a prior attempt for
+                # this exact command already committed (e.g. the client retried a
+                # request whose response was lost). Replay the original result
+                # instead of surfacing a misleading conflict/rollback (audit
+                # backend#2 / DB#3).
+                if state == "23505":
+                    replay = self._replay(params)
+                    if replay is not None:
+                        return replay
+                    raise
+                if state != "40001" or attempt >= self._max_serialization_retries:
                     raise
                 sleep(0.025 * (2**attempt))
         raise AssertionError("serialization retry loop must return or raise")
+
+    def _replay(self, params: dict[str, Any]) -> RemediationResult | None:
+        """Return the already-committed result for this idempotency key, if any."""
+        try:
+            with self._connection_provider() as connection:
+                with connection.transaction():
+                    with connection.cursor() as cursor:
+                        cursor.execute(REPLAY_LOOKUP_SQL, params)
+                        row = cursor.fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        action_id, transaction_id, applied_at, event_id, deploy_id = row
+        return RemediationResult(
+            action_id=_uuid(action_id),
+            transaction_id=_uuid(transaction_id),
+            deploy_id=_uuid(deploy_id) if deploy_id is not None else None,
+            event_id=_uuid(event_id),
+            committed_at=applied_at,
+        )
 
     def _execute_once(self, params: dict[str, Any]) -> RemediationResult:
         try:

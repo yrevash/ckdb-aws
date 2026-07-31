@@ -62,11 +62,30 @@ class InMemoryRunbookRepository:
         versions = self.runbooks.setdefault(key, [])
         latest = versions[-1] if versions else None
 
-        if candidate.outcome != "success" and latest is None:
-            mutation = RunbookMutation(
-                "ignored_counterexample", "", 0, 0, 0, "absent"
-            )
+        if candidate.outcome != "success":
+            # A failed / no-effect episode must NEVER create a runbook or
+            # create-and-deprecate the incumbent (memory-poisoning guard, audit
+            # C1). It can only weaken an existing matching runbook, or be ignored
+            # outright when there is nothing to weaken.
+            if latest is None:
+                mutation = RunbookMutation(
+                    "ignored_counterexample", "", 0, 0, 0, "absent"
+                )
+            else:
+                latest.failure_count += 1
+                if latest.failure_count >= latest.success_count:
+                    latest.status = "deprecated"
+                mutation = RunbookMutation(
+                    "weaken",
+                    latest.runbook_id,
+                    latest.version,
+                    latest.success_count,
+                    latest.failure_count,
+                    latest.status,
+                )
         elif latest is None or latest.steps_hash != candidate.steps_hash:
+            # Only a successful episode reaches here, so a create is always
+            # sourced from a proven outcome.
             if len(candidate.embedding) != 1024:
                 raise ValueError("candidate runbook must have a VECTOR(1024) embedding")
             runbook = _LocalRunbook(
@@ -87,7 +106,8 @@ class InMemoryRunbookRepository:
                 runbook.failure_count,
                 runbook.status,
             )
-        elif candidate.outcome == "success":
+        else:
+            # outcome == "success" and steps match the incumbent → reinforce.
             latest.success_count += 1
             if (
                 latest.status == "draft"
@@ -96,18 +116,6 @@ class InMemoryRunbookRepository:
                 latest.status = "active"
             mutation = RunbookMutation(
                 "reinforce",
-                latest.runbook_id,
-                latest.version,
-                latest.success_count,
-                latest.failure_count,
-                latest.status,
-            )
-        else:
-            latest.failure_count += 1
-            if latest.failure_count >= latest.success_count:
-                latest.status = "deprecated"
-            mutation = RunbookMutation(
-                "weaken",
                 latest.runbook_id,
                 latest.version,
                 latest.success_count,
@@ -185,11 +193,6 @@ class CockroachRunbookRepository:
                     )
                     latest = cursor.fetchone()
 
-                    if candidate.outcome != "success" and latest is None:
-                        return RunbookMutation(
-                            "ignored_counterexample", "", 0, 0, 0, "absent"
-                        )
-
                     serialized_steps = json.dumps(candidate.steps, sort_keys=True)
                     existing_steps = None
                     if latest:
@@ -197,7 +200,44 @@ class CockroachRunbookRepository:
                         if isinstance(existing_steps, str):
                             existing_steps = json.loads(existing_steps)
 
-                    if latest is None or existing_steps != list(candidate.steps):
+                    if candidate.outcome != "success":
+                        # A failed / no-effect episode must NEVER create a runbook
+                        # or create-and-deprecate the incumbent (memory-poisoning
+                        # guard, audit C1). It can only weaken an existing runbook,
+                        # or be ignored when there is nothing to weaken.
+                        if latest is None:
+                            return RunbookMutation(
+                                "ignored_counterexample", "", 0, 0, 0, "absent"
+                            )
+                        runbook_id = str(latest[0])
+                        version = int(latest[1])
+                        cursor.execute(
+                            """
+                            UPDATE procedural_memory
+                            SET usage_count = usage_count + 1,
+                                failure_count = failure_count + 1,
+                                success_rate =
+                                  success_count::FLOAT8
+                                  / (usage_count::FLOAT8 + 1.0),
+                                status = CASE
+                                  WHEN failure_count + 1 >= success_count
+                                  THEN 'deprecated'
+                                  ELSE status
+                                END,
+                                last_used_at = now()
+                            WHERE runbook_id = %s
+                            RETURNING success_count, failure_count, status
+                            """,
+                            (runbook_id,),
+                        )
+                        role, operation = "counterexample", "weaken"
+                        counts = cursor.fetchone()
+                        success_count, failure_count = int(counts[0]), int(counts[1])
+                        status = str(counts[2])
+                    elif latest is None or existing_steps != list(candidate.steps):
+                        # Only a successful episode reaches here, so a create (and
+                        # the deprecation of the prior version) is always sourced
+                        # from a proven outcome.
                         version = int(latest[1]) + 1 if latest else 1
                         if latest:
                             cursor.execute(
@@ -245,54 +285,33 @@ class CockroachRunbookRepository:
                         success_count, failure_count = 1, 0
                         status = "draft"
                     else:
+                        # outcome == "success" and steps match the incumbent → reinforce.
                         runbook_id = str(latest[0])
                         version = int(latest[1])
-                        if candidate.outcome == "success":
-                            cursor.execute(
-                                """
-                                UPDATE procedural_memory
-                                SET usage_count = usage_count + 1,
-                                    success_count = success_count + 1,
-                                    success_rate =
-                                      (success_count::FLOAT8 + 1.0)
-                                      / (usage_count::FLOAT8 + 1.0),
-                                    status = CASE
-                                      WHEN status = 'draft'
-                                       AND success_count + 1 >= %s
-                                      THEN 'active'
-                                      ELSE status
-                                    END,
-                                    last_used_at = now()
-                                WHERE runbook_id = %s
-                                RETURNING success_count, failure_count, status
-                                """,
-                                (
-                                    self._reinforcements_to_activate + 1,
-                                    runbook_id,
-                                ),
-                            )
-                            role, operation = "reinforcement", "reinforce"
-                        else:
-                            cursor.execute(
-                                """
-                                UPDATE procedural_memory
-                                SET usage_count = usage_count + 1,
-                                    failure_count = failure_count + 1,
-                                    success_rate =
-                                      success_count::FLOAT8
-                                      / (usage_count::FLOAT8 + 1.0),
-                                    status = CASE
-                                      WHEN failure_count + 1 >= success_count
-                                      THEN 'deprecated'
-                                      ELSE status
-                                    END,
-                                    last_used_at = now()
-                                WHERE runbook_id = %s
-                                RETURNING success_count, failure_count, status
-                                """,
-                                (runbook_id,),
-                            )
-                            role, operation = "counterexample", "weaken"
+                        cursor.execute(
+                            """
+                            UPDATE procedural_memory
+                            SET usage_count = usage_count + 1,
+                                success_count = success_count + 1,
+                                success_rate =
+                                  (success_count::FLOAT8 + 1.0)
+                                  / (usage_count::FLOAT8 + 1.0),
+                                status = CASE
+                                  WHEN status = 'draft'
+                                   AND success_count + 1 >= %s
+                                  THEN 'active'
+                                  ELSE status
+                                END,
+                                last_used_at = now()
+                            WHERE runbook_id = %s
+                            RETURNING success_count, failure_count, status
+                            """,
+                            (
+                                self._reinforcements_to_activate + 1,
+                                runbook_id,
+                            ),
+                        )
+                        role, operation = "reinforcement", "reinforce"
                         counts = cursor.fetchone()
                         success_count, failure_count = int(counts[0]), int(counts[1])
                         status = str(counts[2])
