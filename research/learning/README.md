@@ -17,6 +17,8 @@ guide. Read it top to bottom, or jump to what you need.
 | 07 | [`07-run-it-yourself.md`](./07-run-it-yourself.md) | Hands-on: run the three verifiers and *see* the proofs, so you learn by doing. |
 | 08 | [`08-glossary.md`](./08-glossary.md) | Fast definitions of every term and acronym used in the project. |
 | 09 | [`09-whats-missing-and-next.md`](./09-whats-missing-and-next.md) | **What's still to be done** — the honest remaining-work list and the path to submission. |
+| 10 | [`10-technical-gaps.md`](./10-technical-gaps.md) | The engineering-maturity gaps — real integration, reliability, observability, CI, scale numbers we haven't earned yet. |
+| 11 | [`11-audit-and-reality.md`](./11-audit-and-reality.md) | The 6-way code audit, the bugs it found, and the **"only real"** reset — why the headline numbers changed and what you can trust. |
 
 ## The 30-second version
 
