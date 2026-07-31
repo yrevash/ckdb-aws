@@ -56,3 +56,11 @@ for migration in "$DB_ROOT"/migrations/000[2-9]*.sql; do
     --database postmortem \
     --execute "INSERT INTO schema_migrations (version) VALUES ('$version');"
 done
+
+# Post-migration bootstrap: cluster settings that depend on objects created by
+# the migration chain (sql.log.user_audit references the postmortem_writer role
+# from 0007). Applied last, as a cluster admin. Kept out of the migration chain
+# on purpose -- see db/bootstrap/090_cluster_settings.sql and test_migrations.py.
+"$COCKROACH_BIN" sql \
+  --url "$DATABASE_URL" \
+  --file "$DB_ROOT/bootstrap/090_cluster_settings.sql"

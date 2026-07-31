@@ -79,6 +79,26 @@ CREATE USER IF NOT EXISTS postmortem_agent_writer;
 GRANT postmortem_reader TO postmortem_agent_reader;
 GRANT postmortem_writer TO postmortem_agent_writer;
 
+-- --- Consolidator: the sleep-time consolidation job's write path -----------
+-- The changefeed-triggered consolidation Lambda distills raw episodes into
+-- semantic facts + procedural runbooks. Those writes are deliberately OUT of
+-- postmortem_writer's scope (the agent's synchronous Act path must not be able
+-- to forge learned memory). Give the consolidation job its own least-privilege
+-- role instead, scoped to exactly the tables it writes. Flagged as a follow-up
+-- by Track C in docs/HARDENING.md §6.
+CREATE ROLE IF NOT EXISTS postmortem_consolidator;
+GRANT CONNECT ON DATABASE postmortem TO postmortem_consolidator;
+GRANT USAGE ON SCHEMA postmortem.public TO postmortem_consolidator;
+GRANT SELECT ON TABLE
+    organizations, services, incidents, remediation_actions, episodic_events
+    TO postmortem_consolidator;                                      -- reads the raw incident history it distills
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    semantic_facts, procedural_memory,
+    runbook_provenance, semantic_fact_provenance
+    TO postmortem_consolidator;                                      -- writes/reinforces distilled memory + provenance
+CREATE USER IF NOT EXISTS postmortem_agent_consolidator;
+GRANT postmortem_consolidator TO postmortem_agent_consolidator;
+
 -- ============================================================================
 -- Section 2 -- SQL audit logging on the tables the agent mutates
 -- ============================================================================
@@ -148,7 +168,12 @@ ALTER TABLE procedural_memory SET (schema_locked = true);
 -- query rate is the "high overhead" case the skill itself warns against);
 -- postmortem_writer -- the only role that can mutate agent-owned tables --
 -- is fully audited.
-SET CLUSTER SETTING sql.log.user_audit = 'postmortem_writer ALL';
+-- NOTE: the `sql.log.user_audit` cluster setting was moved OUT of this app
+-- migration into db/bootstrap/090_cluster_settings.sql (run post-migration by
+-- db/apply.sh as admin). Cluster settings must not live in the migration chain
+-- (test_migrations.py enforces this; the migration identity lacks
+-- MODIFYCLUSTERSETTING). The reader/writer/consolidator roles + table-level
+-- EXPERIMENTAL_AUDIT above remain here where they belong.
 
 -- (c) Admin audit logging: every statement executed by an `admin`-role
 -- principal (schema migrations, GRANT/REVOKE, cluster-setting changes -- the
@@ -156,4 +181,5 @@ SET CLUSTER SETTING sql.log.user_audit = 'postmortem_writer ALL';
 -- configuring-audit-logging skill calls this "minimal overhead, high value";
 -- there is no reason to skip it once (b) above already pays the admin-
 -- privilege cost for this migration run.
-SET CLUSTER SETTING sql.log.admin_audit.enabled = true;
+-- NOTE: `sql.log.admin_audit.enabled` also moved to
+-- db/bootstrap/090_cluster_settings.sql (see the note above).

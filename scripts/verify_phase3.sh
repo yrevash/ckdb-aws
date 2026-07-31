@@ -58,14 +58,30 @@ echo "   region-kill-and-recover cycle -- the exit gate calls for reproducibilit
 echo "   not a single lucky run)..."
 "$ROOT_DIR/scripts/measure_resilience.sh"
 
-# TODO(integration): Track B temporal suite
-# Bitemporal fact transitions + temporal-drift evaluation
-# (research/postmortem/07-... / docs/PHASE3_PLAN.md Track B). Append here:
-#   (cd "$ROOT_DIR/..." && ... run Track B's tests/evaluation ...)
+echo "== Phase 3 verification: Track B (bitemporal facts & temporal drift) =="
+# Run the temporal suites against the live multi-region primary (us-east-1 node
+# on :26400) -- proves bitemporal transitions + currently-valid recall + the
+# temporal-validity metric hold under the SURVIVE REGION FAILURE topology, not
+# just on a single node. The live bitemporal test is skip-guarded on
+# POSTMORTEM_TEST_DATABASE_URL.
+MR_PRIMARY_URL="postgresql://root@localhost:26400/postmortem?sslmode=disable"
+(
+  cd "$ROOT_DIR"
+  POSTMORTEM_TEST_DATABASE_URL="$MR_PRIMARY_URL" \
+    PYTHONPATH="$ROOT_DIR/backend/src:$ROOT_DIR/simulator:$ROOT_DIR/evaluation" \
+    "$ROOT_DIR/backend/.venv/bin/pytest" -q \
+      backend/tests/test_bitemporal_recall.py \
+      backend/tests/test_bitemporal_live.py \
+      simulator/tests/test_temporal_drift.py \
+      evaluation/tests/test_temporal_validity.py
+)
 
-# TODO(integration): Track C hardening suite
-# Audit logging, backup/PITR smoke test, Agent-Skills findings, least-
-# privilege grant checks (docs/PHASE3_PLAN.md Track C). Append here:
-#   (cd "$ROOT_DIR/..." && ... run Track C's tests/checks ...)
+echo "== Phase 3 verification: Track C (production hardening) =="
+# Both scripts are fully self-contained: each spins its own throwaway node
+# (:26268 / :26269), applies every migration via db/apply.sh (which now also
+# applies bootstrap/090's cluster settings), proves its property, and tears
+# down. They do not touch the multi-region cluster or the Phase 1/2 node.
+"$ROOT_DIR/scripts/audit_check.sh"
+"$ROOT_DIR/scripts/backup_pitr_smoke.sh"
 
-echo "Phase 3 (resilience) verification passed."
+echo "Phase 3 verification passed (Track A resilience + Track B temporal + Track C hardening)."
