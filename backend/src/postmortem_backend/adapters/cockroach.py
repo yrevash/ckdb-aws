@@ -41,6 +41,22 @@ target AS MATERIALIZED (
       AND i.status IN ('open', 'mitigating')
     FOR UPDATE
 ),
+-- Runbook status gate (audit DB#5): a cited runbook must be 'active' or the
+-- action no-ops, mirroring the incident-state gate above. %(runbook_id)s is
+-- optional (a remediation need not cite a runbook), so this CTE also
+-- succeeds -- with a NULL row -- when no runbook was cited at all; it only
+-- withholds a row when a *non-null* runbook_id fails to resolve to an
+-- active procedural_memory row.
+runbook_gate AS MATERIALIZED (
+    SELECT rb.runbook_id
+    FROM procedural_memory AS rb
+    WHERE rb.org_id = %(org_id)s
+      AND rb.runbook_id = %(runbook_id)s
+      AND rb.status = 'active'
+    UNION ALL
+    SELECT NULL::UUID WHERE %(runbook_id)s IS NULL
+    LIMIT 1
+),
 action AS (
     INSERT INTO deploys (
         org_id, service_id, version, action, deployed_by, status
@@ -50,6 +66,7 @@ action AS (
         %(deployed_by)s, 'completed'
     FROM target
     CROSS JOIN provenance
+    CROSS JOIN runbook_gate
     RETURNING deploy_id
 ),
 service_update AS (

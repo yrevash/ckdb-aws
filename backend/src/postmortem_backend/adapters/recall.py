@@ -109,19 +109,54 @@ WHERE nearest.subject LIKE 'org:%%'
 
 # Bitemporal transition: close the currently-valid fact (if any) and open the
 # new one -- a fact is never overwritten in place. Mirrors
-# research/postmortem/01-memory-architecture.md section 2, with one
-# deliberate correction proven against a live cluster: that doc's sketch
-# closes the old row and inserts the new row as a single multi-CTE
-# statement, but CockroachDB rejects mixing an UPDATE and an INSERT against
-# the *same* table in one statement by default
-# (sql.multiple_modifications_of_table.enabled=false, "to prevent data
-# corruption") -- and turning that guard off cluster-wide is not a trade this
-# track makes for one query. So the transition is two statements in one
-# explicit, client-retried transaction instead of one implicit
-# server-retried statement: still fully atomic (both commit or neither
-# does), just not single-round-trip. The insert runs first specifically so
-# the FK on superseded_by (checked per-statement, not deferred) has a row to
-# point at when the close/supersede update runs second.
+# research/postmortem/01-memory-architecture.md section 2, with two
+# deliberate corrections proven against a live cluster:
+#
+# 1. That doc's sketch closes the old row and inserts the new row as a
+#    single multi-CTE statement, but CockroachDB rejects mixing an UPDATE
+#    and an INSERT against the *same* table in one statement by default
+#    (sql.multiple_modifications_of_table.enabled=false, "to prevent data
+#    corruption") -- and turning that guard off cluster-wide is not a trade
+#    this track makes for one query. So the transition is multiple
+#    statements in one explicit, client-retried transaction instead of one
+#    implicit server-retried statement: still fully atomic (both commit or
+#    neither does), just not single-round-trip.
+#
+# 2. `semantic_current` (0003_memory_indexes.sql, made UNIQUE by
+#    0008_semantic_current_unique_and_remediation_memory_index.sql -- audit
+#    DB#2) allows at most one row per (org_id, subject, predicate) with
+#    valid_to IS NULL. That means the *old* row must already be closed
+#    (valid_to set) before the *new* row -- which is born with valid_to
+#    NULL -- can be inserted; inserting first would transiently leave two
+#    "open" rows for the same key and fail the unique index immediately,
+#    not just under concurrency. So CLOSE now runs first (locating the
+#    current row, if any, by (org_id, subject, predicate) -- this UPDATE's
+#    own row-level lock is what serializes two transitions racing on the
+#    *same* existing fact into a 40001 retry), then INSERT, then a final
+#    LINK step sets the old row's superseded_by -- deferred to a third
+#    statement because the FK on superseded_by is checked per-statement
+#    (not deferred), so the new row has to exist before the old row can
+#    point at it.
+#
+# The residual race CLOSE's row lock cannot cover is two transitions for a
+# subject/predicate with *no* current row yet (nothing to lock): both see
+# zero rows to close and both attempt the INSERT. One succeeds; the other
+# hits the unique index as a 23505 (not a 40001, since there was no shared
+# row to conflict the transaction timestamps over). `transition_fact`'s
+# retry loop treats 23505 the same as 40001 -- retry the whole transaction,
+# which re-resolves the current row from scratch on the next attempt (by
+# then the first transition's row is visible, so the retry correctly closes
+# it instead of re-inserting).
+CLOSE_SUPERSEDED_FACT_SQL = """
+UPDATE semantic_facts
+SET valid_to = %(transition_at)s
+WHERE org_id = %(org_id)s
+  AND subject = %(subject)s
+  AND predicate = %(predicate)s
+  AND valid_to IS NULL
+RETURNING fact_id
+"""
+
 INSERT_TRANSITIONED_FACT_SQL = """
 INSERT INTO semantic_facts (
     fact_id, org_id, agent_id, subject, predicate, object, confidence,
@@ -135,14 +170,11 @@ VALUES (
 RETURNING fact_id, valid_from, recorded_at
 """
 
-CLOSE_SUPERSEDED_FACT_SQL = """
+LINK_SUPERSEDED_FACT_SQL = """
 UPDATE semantic_facts
-SET valid_to = %(transition_at)s, superseded_by = %(new_fact_id)s
+SET superseded_by = %(new_fact_id)s
 WHERE org_id = %(org_id)s
-  AND subject = %(subject)s
-  AND predicate = %(predicate)s
-  AND valid_to IS NULL
-  AND fact_id != %(new_fact_id)s
+  AND fact_id = %(old_fact_id)s
 RETURNING fact_id
 """
 
@@ -286,11 +318,21 @@ class CockroachRecallAdapter:
             "transition_at": transition_at or datetime.now(UTC),
         }
 
+        # 40001 (serialization failure -- two transitions on the same existing
+        # fact conflicted on CLOSE's row lock) and 23505 (unique-constraint
+        # collision -- two transitions on a subject/predicate with no prior
+        # fact both attempted the INSERT) are both retried the same way: the
+        # whole transaction, never a single statement, per CockroachDB's
+        # retry contract. See the CLOSE/INSERT/LINK ordering comment above
+        # (audit DB#2) for why 23505 is possible here at all.
         for attempt in range(max_serialization_retries + 1):
             try:
                 return self._transition_fact_once(params)
             except Exception as exc:
-                if _sqlstate(exc) != "40001" or attempt >= max_serialization_retries:
+                if (
+                    _sqlstate(exc) not in {"40001", "23505"}
+                    or attempt >= max_serialization_retries
+                ):
                     raise RecallError("Bitemporal fact transition failed.") from exc
                 sleep(0.025 * (2**attempt))
         raise AssertionError("serialization retry loop must return or raise")
@@ -300,6 +342,16 @@ class CockroachRecallAdapter:
             with connection.transaction():
                 with connection.cursor() as cursor:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                    # Close the current row (if any) FIRST: semantic_current is
+                    # now a UNIQUE partial index (audit DB#2), so a new row
+                    # with valid_to NULL cannot coexist with an already-open
+                    # one for the same (org_id, subject, predicate).
+                    cursor.execute(CLOSE_SUPERSEDED_FACT_SQL, params)
+                    closed_row = cursor.fetchone()
+                    old_fact_id = (
+                        _optional_uuid(closed_row[0]) if closed_row else None
+                    )
+
                     cursor.execute(INSERT_TRANSITIONED_FACT_SQL, params)
                     new_row = cursor.fetchone()
                     if new_row is None:
@@ -307,16 +359,47 @@ class CockroachRecallAdapter:
                             "Bitemporal fact transition insert returned no row."
                         )
                     _, valid_from, recorded_at = new_row
-                    cursor.execute(CLOSE_SUPERSEDED_FACT_SQL, params)
-                    superseded_row = cursor.fetchone()
+
+                    if old_fact_id is not None:
+                        cursor.execute(
+                            LINK_SUPERSEDED_FACT_SQL,
+                            {**params, "old_fact_id": old_fact_id},
+                        )
         return FactTransitionResult(
             new_fact_id=_uuid(params["new_fact_id"]),
             valid_from=valid_from,
             recorded_at=recorded_at,
-            superseded_fact_id=(
-                _optional_uuid(superseded_row[0]) if superseded_row else None
-            ),
+            superseded_fact_id=old_fact_id,
         )
+
+    def _run_read_only(
+        self,
+        executor: Any,
+        *,
+        max_retries: int = 3,
+    ) -> Any:
+        """Run ``executor(cursor)`` inside a READ ONLY transaction, retrying
+        the whole transaction on 40001 with exponential backoff (audit
+        backend#3 / DB#4): the write paths already retry a serialization
+        failure end-to-end; the read paths did not, even though a
+        multi-statement READ ONLY transaction can still observe 40001 under
+        contention (CockroachDB's implicit auto-retry only covers a single
+        statement whose result fits in one batch, not this three-query
+        recall or the belief-history scan).
+        """
+
+        for attempt in range(max_retries + 1):
+            try:
+                with self._connection_provider() as connection:
+                    with connection.transaction():
+                        with connection.cursor() as cursor:
+                            cursor.execute("SET TRANSACTION READ ONLY")
+                            return executor(cursor)
+            except Exception as exc:
+                if _sqlstate(exc) != "40001" or attempt >= max_retries:
+                    raise
+                sleep(0.025 * (2**attempt))
+        raise AssertionError("serialization retry loop must return or raise")
 
     def fact_history(
         self, *, org_id: UUID, subject: str, predicate: str
@@ -327,11 +410,9 @@ class CockroachRecallAdapter:
 
         params = {"org_id": org_id, "subject": subject, "predicate": predicate}
         try:
-            with self._connection_provider() as connection:
-                with connection.transaction():
-                    with connection.cursor() as cursor:
-                        cursor.execute("SET TRANSACTION READ ONLY")
-                        rows = _fetch(cursor, FACT_HISTORY_SQL, params)
+            rows = self._run_read_only(
+                lambda cursor: _fetch(cursor, FACT_HISTORY_SQL, params)
+            )
         except Exception as exc:
             raise RecallError("Fact history lookup failed.") from exc
         return tuple(
@@ -363,14 +444,14 @@ class CockroachRecallAdapter:
             "embedding": _vector_literal(query.embedding),
             "candidate_limit": self._ranker.policy.candidate_limit(query.k),
         }
+        def _do(cursor: Any) -> tuple[Any, Any, Any]:
+            episodes = _fetch(cursor, EPISODIC_RECALL_SQL, params)
+            facts = _fetch(cursor, SEMANTIC_RECALL_SQL, params)
+            runbooks = _fetch(cursor, PROCEDURAL_RECALL_SQL, params)
+            return episodes, facts, runbooks
+
         try:
-            with self._connection_provider() as connection:
-                with connection.transaction():
-                    with connection.cursor() as cursor:
-                        cursor.execute("SET TRANSACTION READ ONLY")
-                        episodes = _fetch(cursor, EPISODIC_RECALL_SQL, params)
-                        facts = _fetch(cursor, SEMANTIC_RECALL_SQL, params)
-                        runbooks = _fetch(cursor, PROCEDURAL_RECALL_SQL, params)
+            episodes, facts, runbooks = self._run_read_only(_do)
         except Exception as exc:
             raise RecallError("Direct CockroachDB memory recall failed.") from exc
 

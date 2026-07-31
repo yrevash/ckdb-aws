@@ -73,6 +73,35 @@ class MigrationContractTests(unittest.TestCase):
         statements = [part for part in executable_sql.split(";") if part.strip()]
         self.assertEqual(1, len(statements))
 
+    def test_record_action_and_final_select_are_gated_not_phantom_rows(self) -> None:
+        """DB#1: record_action's INSERT ... SELECT must draw its row FROM
+        record_episode (so it runs zero times when the upstream
+        incident/runbook/provenance gate in action_context rejected the
+        request), and the query's terminal SELECT must draw FROM the same
+        upstream CTEs -- not a bare scalar subquery with no FROM clause,
+        which always evaluates to exactly one (NULL-padded) row regardless
+        of whether anything upstream actually matched. That bare-scalar
+        shape is exactly the bug: a caller sees a 'success' response for a
+        rollback that never happened.
+        """
+
+        self.assertIn(
+            "record_action AS (\n    INSERT INTO remediation_actions", self.query
+        )
+        self.assertIn(
+            "record_episode.event_id, $9\n    FROM record_episode", self.query
+        )
+        # The old buggy shape: a scalar subquery inline in the SELECT list,
+        # with no FROM clause gating the INSERT on record_episode existing.
+        self.assertNotIn("(SELECT event_id FROM record_episode), $9", self.query)
+        final_select = self.query.rsplit(")\nSELECT", 1)[-1]
+        self.assertIn("FROM rollback_deploy", final_select)
+        self.assertIn("CROSS JOIN record_episode", final_select)
+        self.assertIn("CROSS JOIN record_action", final_select)
+        # No bare scalar subqueries (`(SELECT ... FROM <cte>)`) remain in the
+        # terminal SELECT's column list -- every value is a gated join column.
+        self.assertNotRegex(final_select, r"\(SELECT\s+\w+\s+FROM\s+\w+\)")
+
 
 if __name__ == "__main__":
     unittest.main()

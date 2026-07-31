@@ -28,6 +28,7 @@ from postmortem_backend.guardrails.allowlist import (
     ApprovalRecord,
     authorize_action,
     enforce_tool_allowlist,
+    is_critical_tier_service,
     is_high_blast_radius,
     resolve_decision_tool,
 )
@@ -111,6 +112,63 @@ class DestructiveGateTests(unittest.TestCase):
         self.assertTrue(record.high_blast_radius)
         self.assertEqual(record.approver, "oncall@granthvani.com")
         self.assertIn("approver", record.to_dict())
+
+
+class CriticalServiceGateTests(unittest.TestCase):
+    """C2 (HIGH): destructiveness is a server-side decision keyed on
+    service_tags, not on the reasoner's own requires_human_approval flag.
+    """
+
+    def test_is_critical_tier_service_matches_known_tags_case_insensitively(self) -> None:
+        self.assertTrue(is_critical_tier_service(("Checkout",)))
+        self.assertTrue(is_critical_tier_service(("payments", "other")))
+        self.assertTrue(is_critical_tier_service((" BILLING ",)))
+        self.assertFalse(is_critical_tier_service(("inventory", "search")))
+        self.assertFalse(is_critical_tier_service(()))
+
+    def test_rollback_on_critical_service_is_high_blast_radius_even_if_model_says_no(
+        self,
+    ) -> None:
+        # requires_human_approval=False is exactly what a lying/wrong model
+        # would report to skip the gate -- the server-side check must still
+        # flag it because the service is critical-tier.
+        cmd = command(action=ActionKind.ROLLBACK, requires_human_approval=False)
+        self.assertTrue(is_high_blast_radius(cmd, service_tags=("checkout",)))
+        with self.assertRaises(DestructiveActionBlocked):
+            authorize_action(
+                cmd, human_approved=False, service_tags=("checkout", "web")
+            )
+
+    def test_restart_on_payments_tier_also_requires_approval(self) -> None:
+        cmd = command(action=ActionKind.RESTART, requires_human_approval=False)
+        with self.assertRaises(DestructiveActionBlocked):
+            authorize_action(cmd, human_approved=False, service_tags=("payments",))
+
+    def test_named_approval_still_permits_a_critical_service_rollback(self) -> None:
+        cmd = command(action=ActionKind.ROLLBACK, requires_human_approval=False)
+        record = authorize_action(
+            cmd,
+            human_approved=True,
+            approver="sre@granthvani.com",
+            service_tags=("checkout",),
+        )
+        self.assertTrue(record.high_blast_radius)
+        self.assertEqual(record.approver, "sre@granthvani.com")
+
+    def test_rollback_on_a_non_critical_service_stays_auto_approved(self) -> None:
+        cmd = command(action=ActionKind.ROLLBACK, requires_human_approval=False)
+        record = authorize_action(
+            cmd, human_approved=False, service_tags=("inventory-search",)
+        )
+        self.assertFalse(record.high_blast_radius)
+        self.assertTrue(record.approved)
+
+    def test_model_flag_can_only_add_caution_never_remove_it(self) -> None:
+        # The model asking for approval on a NON-critical service is still
+        # honored (advisory upgrade, never a downgrade of the server check).
+        cmd = command(action=ActionKind.ROLLBACK, requires_human_approval=True)
+        with self.assertRaises(DestructiveActionBlocked):
+            authorize_action(cmd, human_approved=False, service_tags=("inventory",))
 
 
 class ServiceDestructiveGateTests(unittest.TestCase):

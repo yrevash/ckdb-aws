@@ -29,6 +29,13 @@ def test_fake_api_runs_the_seeded_vertical_slice() -> None:
                 "summary": "Checkout 5xx rose after the canary deploy",
                 "error_signature": "HTTP_5XX_POST_DEPLOY",
                 "service_tags": ["checkout", "critical-path"],
+                # "checkout" is a server-classified critical-tier service
+                # (audit C2): a ROLLBACK now requires named human approval
+                # regardless of the reasoner's own flag. This request
+                # exercises the full happy path end-to-end, so it supplies
+                # the approval the gate now requires.
+                "approved": True,
+                "approved_by": "sre@granthvani.com",
             },
         )
         detail = client.get(f"/v1/incidents/{INCIDENT_ID}")
@@ -55,6 +62,10 @@ def test_fake_api_records_idempotent_consolidation_ready_outcome() -> None:
                 "summary": "Checkout 5xx rose after the canary deploy",
                 "error_signature": "HTTP_5XX_POST_DEPLOY",
                 "service_tags": ["checkout", "critical-path"],
+                # See test_fake_api_runs_the_seeded_vertical_slice: "checkout"
+                # is a server-classified critical-tier service (audit C2).
+                "approved": True,
+                "approved_by": "sre@granthvani.com",
             },
         )
         action_id = response.json()["remediation"]["action_id"]

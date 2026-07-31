@@ -5,7 +5,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
-from postmortem_backend.adapters.cockroach import CockroachAtomicRemediationStore
+from postmortem_backend.adapters.cockroach import (
+    REMEDIATE_AND_RECORD_SQL,
+    CockroachAtomicRemediationStore,
+)
 from postmortem_backend.adapters.fakes import FakeEmbeddingAdapter
 from postmortem_backend.domain import ActionKind, RemediationCommand
 from postmortem_backend.errors import ProvenanceError
@@ -112,6 +115,27 @@ class CockroachAdapterTests(unittest.TestCase):
 
         self.assertEqual(connection.commits, 0)
         self.assertEqual(connection.rollbacks, 1)
+
+    def test_query_gates_the_action_on_an_active_cited_runbook(self) -> None:
+        """DB#5: a cited runbook_id must resolve to an *active*
+        procedural_memory row, not merely an existing one -- the query must
+        no-op (return zero rows -> ProvenanceError) for a draft/deprecated
+        runbook, exactly like the incident-status gate above it.
+        """
+
+        self.assertIn("runbook_gate AS MATERIALIZED", REMEDIATE_AND_RECORD_SQL)
+        self.assertIn("rb.status = 'active'", REMEDIATE_AND_RECORD_SQL)
+        # The optional-citation escape hatch: a remediation that cited no
+        # runbook at all (runbook_id IS NULL) must still be able to proceed.
+        self.assertIn(
+            "SELECT NULL::UUID WHERE %(runbook_id)s IS NULL", REMEDIATE_AND_RECORD_SQL
+        )
+        # The gate must actually withhold the `action` row -- not just exist
+        # decoratively -- so the whole atomic write no-ops when it fails.
+        action_cte = REMEDIATE_AND_RECORD_SQL.split("action AS (", 1)[1].split(
+            "),", 1
+        )[0]
+        self.assertIn("CROSS JOIN runbook_gate", action_cte)
 
 
 if __name__ == "__main__":

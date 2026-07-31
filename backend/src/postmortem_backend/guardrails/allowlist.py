@@ -21,6 +21,7 @@ wrote in prose.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -66,6 +67,59 @@ DECISION_TOOL: dict[DecisionKind, str] = {
 HIGH_BLAST_RADIUS_ACTIONS: frozenset[ActionKind] = frozenset(
     {ActionKind.SCALE, ActionKind.FEATURE_FLAG}
 )
+
+# Server-side critical-service policy (audit C2, HIGH). Before this fix, the
+# ONLY thing that made a ROLLBACK/RESTART "high blast radius" was
+# ``command.requires_human_approval`` -- a field the reasoner (Bedrock's raw
+# JSON output, see adapters/bedrock.py) sets. A compromised or simply wrong
+# model could therefore set that flag to ``false`` and drive an unapproved
+# rollback/restart of a revenue-critical service straight through the gate.
+# This frozenset is the server's own, code-owned classification of which
+# *named* services are too sensitive for an unattended rollback/restart -- it
+# is never influenced by anything the model returns. Matched case-insensitively
+# against the incident's ``service_tags`` (a structural field the caller sets
+# when opening the incident -- see api.py's RespondRequest -- not reasoner
+# output), so a service tagged e.g. "checkout" or "payments" is always
+# gated, regardless of what the model claims about
+# ``requires_human_approval``.
+#
+# Deliberately scoped to specific business-service names, not the generic
+# ``tier`` classification ("critical-path" -- see services.tier in
+# db/migrations/0002_core_schema.sql): tier alone is too broad a signal here
+# (most demo/simulated services are tagged critical-path) and this policy is
+# about singling out the handful of services where an unattended
+# rollback/restart has direct revenue or compliance blast radius. A fuller
+# policy keyed on the DB's own services.tier column (looked up by
+# service_id rather than trusting the caller-supplied service_tags) is a
+# natural follow-up once the recall path can join that context in --
+# tracked as a deploy-time hardening note, not done here to avoid adding a
+# DB round-trip to every authorization decision.
+CRITICAL_SERVICE_TAGS: frozenset[str] = frozenset(
+    {
+        "checkout",
+        "payments",
+        "payment",
+        "billing",
+        "invoicing",
+    }
+)
+
+# Actions the critical-service policy applies to. ROLLBACK/RESTART are
+# otherwise auto-approved (see HIGH_BLAST_RADIUS_ACTIONS above); on a
+# critical-tier service they still touch production traffic for a
+# revenue-critical path, so they are promoted to "requires human approval"
+# regardless of the model's stated intent.
+_CRITICAL_SERVICE_GATED_ACTIONS: frozenset[ActionKind] = frozenset(
+    {ActionKind.ROLLBACK, ActionKind.RESTART}
+)
+
+
+def is_critical_tier_service(service_tags: Iterable[str]) -> bool:
+    """True if any tag in ``service_tags`` names a server-classified
+    critical-tier service (case-insensitive, whitespace-trimmed)."""
+
+    normalized = {str(tag).strip().lower() for tag in service_tags}
+    return not normalized.isdisjoint(CRITICAL_SERVICE_TAGS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,13 +170,31 @@ def resolve_decision_tool(kind: DecisionKind) -> str:
     return enforce_tool_allowlist(tool)
 
 
-def is_high_blast_radius(command: RemediationCommand) -> bool:
-    """A command is high blast radius if its action is inherently destructive OR
-    the policy tier flagged it as requiring human approval (e.g. rollback on a
-    payments critical path)."""
+def is_high_blast_radius(
+    command: RemediationCommand, *, service_tags: Iterable[str] = ()
+) -> bool:
+    """A command is high blast radius if any of the following hold:
 
+    * its action is inherently destructive (``HIGH_BLAST_RADIUS_ACTIONS``); or
+    * it targets a server-classified critical-tier service with a
+      ROLLBACK/RESTART (audit C2 -- a SERVER-side decision keyed on
+      ``service_tags``, never on anything the model returned); or
+    * the reasoner's own ``requires_human_approval`` flag is set.
+
+    That last check is intentionally an OR, not the sole signal (audit C2,
+    "do not trust the model flag"): the model can only ever ADD caution by
+    setting it, never remove the caution the first two, server-controlled
+    checks already established. A model that lies and reports ``false`` for
+    a checkout rollback is still caught by the critical-tier check above.
+    """
+
+    critical_tier_destructive = (
+        command.action in _CRITICAL_SERVICE_GATED_ACTIONS
+        and is_critical_tier_service(service_tags)
+    )
     return (
         command.action in HIGH_BLAST_RADIUS_ACTIONS
+        or critical_tier_destructive
         or command.requires_human_approval
     )
 
@@ -132,6 +204,7 @@ def authorize_action(
     *,
     human_approved: bool,
     approver: str | None = None,
+    service_tags: Iterable[str] = (),
 ) -> ApprovalRecord:
     """Authorize (or refuse) a remediation before it touches the database.
 
@@ -139,13 +212,17 @@ def authorize_action(
     * Refuses a high-blast-radius/irreversible action unless ``human_approved``.
     * Requires a named ``approver`` when approving such an action -- an
       anonymous approval is not an approval.
+    * Classifies destructiveness SERVER-side (audit C2): ``service_tags``
+      (the incident's own typed field, not reasoner output) decides whether
+      a ROLLBACK/RESTART on a critical-tier service requires approval,
+      regardless of what the model claimed.
 
     Returns an :class:`ApprovalRecord` on success (for the caller to audit); the
     caller must record it. Raises :class:`DestructiveActionBlocked` on refusal.
     """
 
     tool = enforce_tool_allowlist("remediate_and_record")
-    high_blast = is_high_blast_radius(command)
+    high_blast = is_high_blast_radius(command, service_tags=service_tags)
 
     if not high_blast:
         return ApprovalRecord(

@@ -53,6 +53,33 @@ class SecurityStack(Stack):
                 },
             )
         )
+        # The trail also fans out to a CMK-encrypted CloudWatch Logs group. Logs
+        # is not an IAM identity, so — like SharedStack's key — the CloudWatch
+        # Logs service principal must be granted use of the key directly in the
+        # key policy, or the encrypted log group fails to deliver at deploy time.
+        trail_key.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowCloudWatchLogs",
+                principals=[
+                    iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
+                ],
+                actions=[
+                    "kms:Encrypt*",
+                    "kms:Decrypt*",
+                    "kms:ReEncrypt*",
+                    "kms:GenerateDataKey*",
+                    "kms:Describe*",
+                ],
+                resources=["*"],
+                conditions={
+                    "ArnLike": {
+                        "kms:EncryptionContext:aws:logs:arn": (
+                            f"arn:aws:logs:{self.region}:{self.account}:log-group:*"
+                        )
+                    }
+                },
+            )
+        )
 
         trail_log_group = logs.LogGroup(
             self,
@@ -125,6 +152,13 @@ class SecurityStack(Stack):
         )
 
         # ---- AWS Config (continuous compliance) ------------------------------
+        # [deploy-time] SSE-S3 (AES-256) is retained here deliberately rather than
+        # the CMK: the bucket already blocks all public access, enforces TLS in
+        # transit, and is versioned, and its only contents are AWS Config's own
+        # compliance snapshots. Moving to SSE-KMS would additionally require
+        # granting the AWS Config delivery principal kms:GenerateDataKey on the
+        # key (otherwise delivery silently fails at runtime), so the CMK upgrade
+        # is deferred to a deploy-time change with that grant in place.
         config_bucket = s3.Bucket(
             self,
             "ConfigBucket",

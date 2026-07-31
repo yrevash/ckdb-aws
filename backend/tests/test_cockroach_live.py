@@ -22,6 +22,7 @@ from postmortem_backend.domain import (
     RecallQuery,
     RemediationCommand,
 )
+from postmortem_backend.errors import ProvenanceError
 
 
 DATABASE_URL = os.getenv("POSTMORTEM_TEST_DATABASE_URL")
@@ -211,6 +212,130 @@ def test_remediation_and_memory_commit_together_in_live_cockroach() -> None:
     )
     assert outcome.event_id == replay.event_id
     assert replay.idempotent_replay is True
+
+
+@pytest.mark.skipif(
+    not DATABASE_URL,
+    reason="set POSTMORTEM_TEST_DATABASE_URL to run the live CockroachDB proof",
+)
+def test_inactive_runbook_is_rejected_and_nothing_commits() -> None:
+    """DB#5: REMEDIATE_AND_RECORD_SQL must gate on the cited runbook's
+    *status*, not merely its existence -- a runbook that exists but was
+    never promoted out of 'draft' (or has since been 'deprecated') must not
+    be able to drive a live remediation. Before this fix, citing such a
+    runbook silently proceeded because the query only checked the
+    provenance CTE (does the id resolve to a row at all), never
+    procedural_memory.status.
+    """
+    assert DATABASE_URL is not None
+    ids = [uuid4() for _ in range(6)]
+    org_id, agent_id, service_id, incident_id, session_id, runbook_id = ids
+    embedding = tuple([1.0] + [0.0] * 1023)
+    vector = "[" + ",".join(map(str, embedding)) + "]"
+
+    with psycopg.connect(DATABASE_URL, autocommit=False) as connection:
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO organizations (org_id, slug, display_name) "
+                    "VALUES (%s, %s, %s)",
+                    (org_id, f"db5-{org_id}", "DB#5 runbook-gate live verification"),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO services (
+                        service_id, org_id, name, tier, health,
+                        current_version, previous_stable_version
+                    )
+                    VALUES (%s, %s, %s, 'critical-path', 'degraded', '1.5.0', '1.4.2')
+                    """,
+                    (service_id, org_id, f"checkout-{service_id}"),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO procedural_memory (
+                        runbook_id, org_id, agent_id, name, status, trigger_desc,
+                        embedding, steps, usage_count, success_count, success_rate,
+                        created_by
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'draft', %s, %s::VECTOR(1024),
+                        %s::JSONB, 0, 0, 0.0, 'db5-smoke'
+                    )
+                    """,
+                    (
+                        runbook_id,
+                        org_id,
+                        agent_id,
+                        f"draft-rollback-{runbook_id}",
+                        "5xx spike after deploy",
+                        vector,
+                        '[{"action":"rollback"}]',
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO incidents (
+                        incident_id, org_id, service_id, title, severity, status,
+                        family_id, variant_id, runbook_id, session_id
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'SEV1', 'open',
+                        'F1_BAD_DEPLOY', 'db5-live', NULL, %s
+                    )
+                    """,
+                    (
+                        incident_id,
+                        org_id,
+                        service_id,
+                        "DB#5 runbook-gate live verification",
+                        session_id,
+                    ),
+                )
+
+    pool = PsycopgPoolProvider(DATABASE_URL)
+    try:
+        with pytest.raises(ProvenanceError):
+            CockroachAtomicRemediationStore(pool).remediate_and_record(
+                RemediationCommand(
+                    org_id=org_id,
+                    agent_id=agent_id,
+                    incident_id=incident_id,
+                    session_id=session_id,
+                    service_id=service_id,
+                    action=ActionKind.ROLLBACK,
+                    target_version="1.4.2",
+                    cited_memory_id=runbook_id,
+                    runbook_id=runbook_id,
+                    rationale="Cited a draft (non-active) runbook.",
+                ),
+                embedding,
+            )
+    finally:
+        pool.close()
+
+    with psycopg.connect(DATABASE_URL) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM remediation_actions "
+                "WHERE org_id = %s AND incident_id = %s",
+                (org_id, incident_id),
+            )
+            actions_count = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT count(*) FROM deploys WHERE org_id = %s AND service_id = %s",
+                (org_id, service_id),
+            )
+            deploys_count = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT status FROM incidents WHERE org_id = %s AND incident_id = %s",
+                (org_id, incident_id),
+            )
+            incident_status = cursor.fetchone()[0]
+
+    assert actions_count == 0
+    assert deploys_count == 0
+    assert incident_status == "open"
 
 
 @pytest.mark.skipif(

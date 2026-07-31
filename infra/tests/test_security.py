@@ -255,6 +255,45 @@ class NetworkTests(unittest.TestCase):
             },
         )
 
+    def _ingress_ports(self, template: Template):
+        """Yield (from_port, to_port, protocol) for every ingress rule.
+
+        Covers both standalone ``SecurityGroupIngress`` resources (used for
+        self-references and cross-stack peers) and inline ingress on a
+        ``SecurityGroup``.
+        """
+
+        for resource in template.find_resources(
+            "AWS::EC2::SecurityGroupIngress"
+        ).values():
+            props = resource.get("Properties", {})
+            yield (props.get("FromPort"), props.get("ToPort"), props.get("IpProtocol"))
+        for sg in template.find_resources("AWS::EC2::SecurityGroup").values():
+            for rule in sg.get("Properties", {}).get("SecurityGroupIngress", []) or []:
+                yield (
+                    rule.get("FromPort"),
+                    rule.get("ToPort"),
+                    rule.get("IpProtocol"),
+                )
+
+    def test_crdb_endpoint_sg_has_26257_ingress(self) -> None:
+        # The CockroachDB PrivateLink endpoint SG must accept inbound SQL from its
+        # in-VPC clients, or the endpoint rejects every connection. The shared SG
+        # carries the self-reference (covers the consolidator), and the app stack
+        # carries the peer rule for the Fargate service SG.
+        shared_ingress = list(self._ingress_ports(self.templates["shared"]))
+        self.assertIn(
+            (26257, 26257, "tcp"),
+            shared_ingress,
+            "CockroachDB endpoint SG is missing self-referencing 26257 ingress",
+        )
+        app_ingress = list(self._ingress_ports(self.templates["app"]))
+        self.assertIn(
+            (26257, 26257, "tcp"),
+            app_ingress,
+            "App stack does not open 26257 from the Fargate service SG",
+        )
+
     def test_waf_web_acl_and_association(self) -> None:
         template = self.templates["app"]
         template.resource_count_is("AWS::WAFv2::WebACLAssociation", 1)
@@ -335,6 +374,30 @@ class GuardrailAndDetectionTests(unittest.TestCase):
                 "EnableLogFileValidation": True,
                 "IsLogging": True,
                 "KMSKeyId": Match.any_value(),
+            },
+        )
+
+    def test_trail_key_grants_cloudwatch_logs(self) -> None:
+        # The trail's CloudWatch Logs group is CMK-encrypted, so the CloudWatch
+        # Logs service principal must be granted use of the key in the key policy
+        # or the encrypted log group fails to deliver at deploy time.
+        self.templates["security"].has_resource_properties(
+            "AWS::KMS::Key",
+            {
+                "KeyPolicy": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Sid": "AllowCloudWatchLogs",
+                                    "Principal": {
+                                        "Service": "logs.us-east-1.amazonaws.com"
+                                    },
+                                }
+                            )
+                        ]
+                    )
+                }
             },
         )
 

@@ -7,6 +7,8 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
+from botocore.config import Config
+
 from ..domain import (
     ActionKind,
     AgentDecision,
@@ -17,6 +19,20 @@ from ..domain import (
     RemediationCommand,
 )
 from ..errors import ReasoningError
+
+
+# Deploy-time client hardening (audit backend#8): the Bedrock SDK's default
+# timeouts are effectively unbounded for this service's purposes (60s connect
+# / no read timeout), so a stalled Bedrock endpoint would hang the responder's
+# perceive-recall-reason-act turn indefinitely. Bound both, and let botocore
+# retry a handful of transient failures (throttling, timeouts) itself before
+# the call surfaces as a ReasoningError. Applied to both the embedding and
+# reasoning clients -- construction only, no per-request behavior change.
+_BEDROCK_CLIENT_CONFIG = Config(
+    connect_timeout=5,
+    read_timeout=30,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
 
 
 class TitanEmbeddingAdapter:
@@ -32,7 +48,9 @@ class TitanEmbeddingAdapter:
         if client is None:
             import boto3
 
-            client = boto3.client("bedrock-runtime", region_name=region)
+            client = boto3.client(
+                "bedrock-runtime", region_name=region, config=_BEDROCK_CLIENT_CONFIG
+            )
         self._client = client
         self._model_id = model_id
 
@@ -72,7 +90,9 @@ class BedrockReasoningAdapter:
         if client is None:
             import boto3
 
-            client = boto3.client("bedrock-runtime", region_name=region)
+            client = boto3.client(
+                "bedrock-runtime", region_name=region, config=_BEDROCK_CLIENT_CONFIG
+            )
         self._client = client
         self._model_id = model_id
 
@@ -166,18 +186,25 @@ def _reasoning_input(signal: IncidentSignal, memory: RecallBundle) -> str:
 def _parse_decision(
     raw: str, signal: IncidentSignal, memory: RecallBundle
 ) -> AgentDecision:
+    # Everything derived directly from the model's raw JSON is untrusted and
+    # must be parsed inside a guarded block (audit backend#4): a malformed
+    # `cited_memory_id` (not a UUID), a malformed/missing `action`, or any
+    # other shape the model returns must map to ReasoningError, never escape
+    # as a bare ValueError/KeyError that FastAPI has no handler for (which
+    # would surface as an unmapped HTTP 500 instead of a 502, see api.py's
+    # error mapping).
     try:
         start = raw.index("{")
         end = raw.rindex("}") + 1
         payload = json.loads(raw[start:end])
         kind = DecisionKind(payload["decision"])
         confidence = float(payload.get("confidence", 0.0))
+        explanation = str(payload.get("explanation", "")).strip()
+        cited_raw = payload.get("cited_memory_id")
+        cited_id = UUID(cited_raw) if cited_raw else None
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ReasoningError("Reasoner did not return the typed decision contract.") from exc
 
-    explanation = str(payload.get("explanation", "")).strip()
-    cited_raw = payload.get("cited_memory_id")
-    cited_id = UUID(cited_raw) if cited_raw else None
     known = {candidate.memory_id: candidate for candidate in memory.all_candidates}
 
     if kind is not DecisionKind.REMEDIATE:
@@ -195,10 +222,18 @@ def _parse_decision(
         raise ReasoningError(
             "Cited memory failed the recall provenance or confidence safety gate."
         )
-    action = ActionKind(payload["action"])
+
+    try:
+        action = ActionKind(payload["action"])
+        target_version = str(payload.get("target_version") or "").strip()
+        requires_human_approval = bool(payload.get("requires_human_approval", False))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ReasoningError(
+            "Reasoner returned a malformed remediation payload."
+        ) from exc
+
     if action not in {ActionKind.ROLLBACK, ActionKind.RESTART}:
         raise ReasoningError("Reasoner selected an action outside the Phase 1 allowlist.")
-    target_version = str(payload.get("target_version") or "").strip()
     if not target_version:
         raise ReasoningError("Reasoner omitted target_version for remediation.")
 
@@ -218,7 +253,7 @@ def _parse_decision(
         cited_memory_id=cited_id,
         runbook_id=runbook_id,
         rationale=explanation,
-        requires_human_approval=bool(payload.get("requires_human_approval", False)),
+        requires_human_approval=requires_human_approval,
     )
     return AgentDecision(
         kind=kind,

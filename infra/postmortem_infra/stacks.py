@@ -219,6 +219,17 @@ class SharedStack(Stack):
             connection=ec2.Port.tcp(443),
             description="HTTPS to in-VPC AWS PrivateLink interface endpoints",
         )
+        # This SG is attached to *both* the CockroachDB interface endpoint and the
+        # in-VPC client compute that shares it (e.g. the consolidator Lambda). An
+        # interface endpoint accepts no inbound traffic without an explicit ingress
+        # rule, so self-reference 26257 here lets any member of this SG reach the
+        # endpoint. Cross-SG clients (the Fargate app service) are added as peers
+        # from their own stack via ``crdb_security_group.connections.allow_from``.
+        self.crdb_security_group.add_ingress_rule(
+            peer=self.crdb_security_group,
+            connection=ec2.Port.tcp(26257),
+            description="CockroachDB SQL to the PrivateLink endpoint from shared-SG clients",
+        )
         crdb_service_name = self.node.try_get_context("crdb_privatelink_service_name")
         if crdb_service_name:
             ec2.InterfaceVpcEndpoint(
@@ -443,7 +454,14 @@ class AppStack(Stack):
         if not agent_image_uri:
             agent_image_uri = "public.ecr.aws/docker/library/python:3.12-slim"
 
-        cluster = ecs.Cluster(self, "Cluster", vpc=shared.vpc, container_insights=True)
+        cluster = ecs.Cluster(
+            self,
+            "Cluster",
+            vpc=shared.vpc,
+            # container_insights=True is deprecated; use the v2 enum so synth stops
+            # warning and this survives the next CDK major.
+            container_insights_v2=ecs.ContainerInsights.ENABLED,
+        )
 
         # Distinct execution role (pulls the image / writes logs) and task role
         # (what the running agent may do) — never merged (least privilege).
@@ -529,6 +547,27 @@ class AppStack(Stack):
             path="/healthz",
             healthy_http_codes="200",
             interval=Duration.seconds(30),
+        )
+
+        # The app task must reach CockroachDB over the shared PrivateLink endpoint.
+        # The endpoint's SG lives in SharedStack, and AppStack already depends on
+        # SharedStack — so opening the ingress via ``connections.allow_from`` would
+        # try to make SharedStack depend back on this service's SG and CDK rejects
+        # the cyclic reference. Instead we author the ingress as a low-level rule
+        # *in this stack*: it references the shared endpoint SG by id (a dependency
+        # that already exists) and names this Fargate service's SG as the peer.
+        # Egress from the service SG is allow-all by default (T8 keeps it in-VPC
+        # via isolated subnets + no NAT), so only ingress needs opening.
+        app_service_sg = service.service.connections.security_groups[0]
+        ec2.CfnSecurityGroupIngress(
+            self,
+            "CrdbEndpointIngressFromAppService",
+            group_id=shared.crdb_security_group.security_group_id,
+            ip_protocol="tcp",
+            from_port=26257,
+            to_port=26257,
+            source_security_group_id=app_service_sg.security_group_id,
+            description="CockroachDB SQL to the PrivateLink endpoint from the app Fargate service",
         )
 
         # ---- AWS WAF on the console ALB (T8) ---------------------------------

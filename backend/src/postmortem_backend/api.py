@@ -18,9 +18,13 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .domain import IncidentSignal, OutcomeCommand, OutcomeKind
 from .errors import (
+    AtomicRemediationError,
     InputValidationError,
+    OutcomeRecordingError,
     PostmortemError,
     PromptInjectionDetected,
+    ReasoningError,
+    RecallError,
     WebhookAuthenticationError,
 )
 from .guardrails.validation import WebhookAuthenticator, validate_changefeed_body
@@ -99,6 +103,49 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(
             status_code=400,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    # Infra/upstream failures (audit backend#5): these are NOT the caller's
+    # fault and are not a genuine data conflict -- they mean the reasoner or
+    # CockroachDB itself failed, timed out, or exhausted its retries. Mapping
+    # them to 409 (as the generic PostmortemError handler below does) told
+    # callers/retriers "your request conflicted with existing state," which
+    # is wrong and actively discourages the retry these failures usually
+    # warrant. 502 (upstream/model returned something unusable) and 503
+    # (CockroachDB/transaction infra unavailable) are both retryable-signal
+    # codes; genuine conflicts (OutcomeConflict, ProvenanceError,
+    # ApprovalRequired/DestructiveActionBlocked -- provenance/approval
+    # rejections) are intentionally left on the generic 409 handler below.
+    @app.exception_handler(ReasoningError)
+    async def reasoning_error(_: Request, exc: ReasoningError) -> JSONResponse:
+        return JSONResponse(
+            status_code=502,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.exception_handler(RecallError)
+    async def recall_error(_: Request, exc: RecallError) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.exception_handler(AtomicRemediationError)
+    async def atomic_remediation_error(
+        _: Request, exc: AtomicRemediationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={"error": type(exc).__name__, "message": str(exc)},
+        )
+
+    @app.exception_handler(OutcomeRecordingError)
+    async def outcome_recording_error(
+        _: Request, exc: OutcomeRecordingError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
             content={"error": type(exc).__name__, "message": str(exc)},
         )
 

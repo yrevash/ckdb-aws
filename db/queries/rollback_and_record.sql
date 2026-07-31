@@ -89,11 +89,15 @@ record_action AS (
         $1, $3, 'rollback_deploy', $5,
         jsonb_build_object('target_version', $6),
         'agent:postmortem', 'success',
-        (SELECT event_id FROM record_episode), $9
+        record_episode.event_id, $9
+    FROM record_episode
     RETURNING action_id, transaction_id
 )
 SELECT
-    (SELECT deploy_id FROM rollback_deploy) AS deploy_id,
-    (SELECT event_id FROM record_episode) AS memory_id,
-    (SELECT action_id FROM record_action) AS action_id,
-    (SELECT transaction_id FROM record_action) AS transaction_id;
+    rollback_deploy.deploy_id AS deploy_id,
+    record_episode.event_id AS memory_id,
+    record_action.action_id AS action_id,
+    record_action.transaction_id AS transaction_id
+FROM rollback_deploy
+CROSS JOIN record_episode
+CROSS JOIN record_action;

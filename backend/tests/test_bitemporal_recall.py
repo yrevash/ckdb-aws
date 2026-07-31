@@ -12,14 +12,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+import pytest
+
 from postmortem_backend.adapters.recall import (
     CLOSE_SUPERSEDED_FACT_SQL,
     INSERT_TRANSITIONED_FACT_SQL,
+    LINK_SUPERSEDED_FACT_SQL,
     CockroachRecallAdapter,
     FactHistoryEntry,
     FactTransitionResult,
 )
 from postmortem_backend.domain import RecallQuery
+from postmortem_backend.errors import RecallError
 from postmortem_backend.recall import RecallRanker
 
 
@@ -212,18 +216,18 @@ def test_ranker_never_treats_a_returned_stale_fact_as_current() -> None:
     assert result.diagnostics["bitemporal"]["stale_facts_returned"] == 0
 
 
-def test_transition_inserts_new_fact_then_closes_and_supersedes_old_one() -> None:
+def test_transition_closes_then_inserts_then_links_old_to_new() -> None:
     old_fact_id = UUID("50000000-0000-0000-0000-000000000091")
     close_cursor_rows = [(old_fact_id,)]
 
     class TransitionCursor(StubCursor):
         def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
             self.executions.append((sql, params))
-            if "INSERT INTO semantic_facts" in sql:
+            if sql.strip().startswith("INSERT INTO semantic_facts"):
                 # The row CockroachDB would actually return: the client-
                 # generated fact_id echoed back, plus server-assigned times.
                 self.current = [(params["new_fact_id"], NOW, NOW)]
-            elif "UPDATE semantic_facts" in sql:
+            elif sql.strip().startswith("UPDATE semantic_facts") and "SET valid_to" in sql:
                 self.current = close_cursor_rows
             else:
                 self.current = []
@@ -248,26 +252,34 @@ def test_transition_inserts_new_fact_then_closes_and_supersedes_old_one() -> Non
 
     assert isinstance(result, FactTransitionResult)
     assert result.superseded_fact_id == old_fact_id
-    # Insert must run before close/supersede: the FK on superseded_by is
-    # checked per-statement (not deferred), so the new row has to exist
-    # before the old row can point at it.
+    # CLOSE must run before INSERT: semantic_current is now a UNIQUE partial
+    # index (audit DB#2), so the old "open" row has to be closed before the
+    # new one (born with valid_to NULL) can be inserted without colliding.
+    # LINK (setting the old row's superseded_by) runs last because the FK on
+    # superseded_by is checked per-statement, not deferred -- the new row has
+    # to exist before the old row can point at it.
     assert cursor.executions[0][0].strip() == "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-    assert cursor.executions[1][0].strip().startswith("INSERT INTO semantic_facts")
-    assert INSERT_TRANSITIONED_FACT_SQL.strip().startswith("INSERT INTO semantic_facts")
-    assert cursor.executions[2][0].strip().startswith("UPDATE semantic_facts")
+    assert cursor.executions[1][0].strip().startswith("UPDATE semantic_facts")
     assert CLOSE_SUPERSEDED_FACT_SQL.strip().startswith("UPDATE semantic_facts")
-    # Both statements share the same client-generated fact id, and that id
+    assert cursor.executions[2][0].strip().startswith("INSERT INTO semantic_facts")
+    assert INSERT_TRANSITIONED_FACT_SQL.strip().startswith("INSERT INTO semantic_facts")
+    assert cursor.executions[3][0].strip().startswith("UPDATE semantic_facts")
+    assert LINK_SUPERSEDED_FACT_SQL.strip().startswith("UPDATE semantic_facts")
+    # CLOSE targets the old row by (org_id, subject, predicate); LINK targets
+    # it precisely by fact_id, using the id CLOSE returned.
+    assert cursor.executions[3][1]["old_fact_id"] == old_fact_id
+    # INSERT and LINK share the same client-generated fact id, and that id
     # is exactly what the caller gets back.
-    assert cursor.executions[1][1]["new_fact_id"] == cursor.executions[2][1]["new_fact_id"]
-    assert result.new_fact_id == cursor.executions[1][1]["new_fact_id"]
+    assert cursor.executions[2][1]["new_fact_id"] == cursor.executions[3][1]["new_fact_id"]
+    assert result.new_fact_id == cursor.executions[2][1]["new_fact_id"]
     assert provider.connection.commits == 1
 
 
-def test_transition_with_no_prior_fact_is_a_pure_insert() -> None:
+def test_transition_with_no_prior_fact_is_a_pure_insert_and_skips_link() -> None:
     class TransitionCursor(StubCursor):
         def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
             self.executions.append((sql, params))
-            if "INSERT INTO semantic_facts" in sql:
+            if sql.strip().startswith("INSERT INTO semantic_facts"):
                 self.current = [(params["new_fact_id"], NOW, NOW)]
             else:
                 self.current = []  # no currently-valid fact to close
@@ -289,8 +301,86 @@ def test_transition_with_no_prior_fact_is_a_pure_insert() -> None:
         transition_at=NOW,
     )
 
-    assert result.new_fact_id == cursor.executions[1][1]["new_fact_id"]
+    # CLOSE (no row), INSERT -- and no LINK, since there was nothing to
+    # supersede. Exactly 3 statements total (SET ISOLATION, CLOSE, INSERT).
+    assert len(cursor.executions) == 3
+    assert result.new_fact_id == cursor.executions[2][1]["new_fact_id"]
     assert result.superseded_fact_id is None
+
+
+def test_transition_retries_on_unique_violation_from_a_concurrent_first_insert() -> None:
+    """DB#2: two transitions racing to create the *first* fact for a
+    subject/predicate (nothing to lock via CLOSE) can collide on the new
+    UNIQUE semantic_current index -- 23505, not 40001. The retry loop treats
+    it the same as a serialization failure: retry the whole transaction,
+    which re-resolves the current row on the next attempt.
+    """
+
+    class ConflictThenSucceedCursor(StubCursor):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.insert_attempts = 0
+
+        def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
+            self.executions.append((sql, params))
+            if sql.strip().startswith("INSERT INTO semantic_facts"):
+                self.insert_attempts += 1
+                if self.insert_attempts == 1:
+                    error = RuntimeError("duplicate key value violates unique constraint")
+                    error.sqlstate = "23505"  # type: ignore[attr-defined]
+                    raise error
+                self.current = [(params["new_fact_id"], NOW, NOW)]
+            else:
+                self.current = []
+
+        def fetchone(self):
+            rows = self.current or []
+            return rows[0] if rows else None
+
+    cursor = ConflictThenSucceedCursor()
+    provider = StubProvider(StubConnection(cursor))
+
+    result = CockroachRecallAdapter(provider).transition_fact(
+        org_id=ORG_ID,
+        agent_id=AGENT_ID,
+        subject="service:new-service",
+        predicate="owner_team",
+        object_value="platform",
+        embedding=tuple([1.0] + [0.0] * 1023),
+        transition_at=NOW,
+    )
+
+    assert cursor.insert_attempts == 2
+    assert result.new_fact_id == UUID(str(result.new_fact_id))
+
+
+def test_transition_gives_up_after_exhausting_retries_on_persistent_conflict() -> None:
+    class AlwaysConflictCursor(StubCursor):
+        def execute(self, sql: str, params: dict[str, object] | None = None) -> None:
+            self.executions.append((sql, params))
+            if sql.strip().startswith("INSERT INTO semantic_facts"):
+                error = RuntimeError("duplicate key value violates unique constraint")
+                error.sqlstate = "23505"  # type: ignore[attr-defined]
+                raise error
+            self.current = []
+
+        def fetchone(self):
+            return None
+
+    cursor = AlwaysConflictCursor({})
+    provider = StubProvider(StubConnection(cursor))
+
+    with pytest.raises(RecallError):
+        CockroachRecallAdapter(provider).transition_fact(
+            org_id=ORG_ID,
+            agent_id=AGENT_ID,
+            subject="service:new-service",
+            predicate="owner_team",
+            object_value="platform",
+            embedding=tuple([1.0] + [0.0] * 1023),
+            transition_at=NOW,
+            max_serialization_retries=1,
+        )
 
 
 def test_fact_history_query_orders_oldest_first_and_is_read_only() -> None:

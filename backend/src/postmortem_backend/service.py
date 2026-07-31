@@ -23,7 +23,7 @@ from .guardrails.allowlist import (
     enforce_tool_allowlist,
     resolve_decision_tool,
 )
-from .guardrails.injection import sanitize_signal
+from .guardrails.injection import guard_untrusted_recall_bundle, sanitize_signal
 from .guardrails.provenance import require_grounded_action
 from .ports import (
     AtomicRemediationPort,
@@ -130,6 +130,14 @@ class ResponderService:
                     current_incident_id=signal.incident_id,
                 )
             )
+            # Screen recalled memory before it reaches the reasoner or the
+            # console event stream (charter C4): episodic/semantic/
+            # procedural content, steps, and metadata are untrusted -- they
+            # can carry an injection payload planted in an earlier incident
+            # and replayed here via recall. Same fail-closed contract as
+            # sanitize_signal above, applied at the recall boundary instead
+            # of the inbound-signal boundary.
+            memory = guard_untrusted_recall_bundle(memory)
             self._event(
                 signal,
                 EventType.RECALL_COMPLETED,
@@ -287,11 +295,27 @@ class ResponderService:
                     # irreversible action without explicit, named human approval;
                     # record the authorization decision (approver + reason) so the
                     # audit trail attributes every executed high-risk action.
+                    # `signal.service_tags` (a structural, typed field on the
+                    # inbound signal -- not reasoner output) drives the
+                    # server-side critical-service classification (C2): the
+                    # model's own `requires_human_approval` flag can only ever
+                    # ADD caution here, never remove a server-computed one.
                     approval_record = authorize_action(
                         command,
                         human_approved=command.approved,
                         approver=approver,
+                        service_tags=signal.service_tags,
                     )
+                    # Compute the action embedding BEFORE emitting
+                    # TRANSACTION_STARTED (audit backend#7): nothing has been
+                    # proposed to CockroachDB yet at this point, so an
+                    # embedding failure here is a *pre-transaction* failure.
+                    # transaction_started is set only immediately before the
+                    # atomic write itself, so a pre-transaction embed failure
+                    # falls through to RESPONSE_FAILED below, not a
+                    # TRANSACTION_ROLLED_BACK event implying a DB transaction
+                    # that never actually started.
+                    action_embedding = self._embedder.embed(command.memory_text())
                     self._event(
                         signal,
                         EventType.TRANSACTION_STARTED,
@@ -304,7 +328,6 @@ class ResponderService:
                         },
                     )
                     transaction_started = True
-                    action_embedding = self._embedder.embed(command.memory_text())
                     remediation_result = self._remediation.remediate_and_record(
                         command, action_embedding
                     )
