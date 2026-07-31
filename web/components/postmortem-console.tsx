@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { ErrorBoundary } from "@/components/error-boundary";
 import { IncidentConsole } from "@/components/incident-console";
 import { ResiliencePanel } from "@/components/resilience-panel";
 import { TemporalDriftPanel } from "@/components/temporal-drift-panel";
@@ -42,12 +43,20 @@ export function PostmortemConsole() {
         </div>
       </nav>
 
-      {view === "investigation" ? <IncidentConsole /> : null}
+      {view === "investigation" ? (
+        <ErrorBoundary surface="Investigation">
+          <IncidentConsole />
+        </ErrorBoundary>
+      ) : null}
       {view === "resilience" ? (
-        <ResiliencePanel view={resilience.view} source={resilience.source} />
+        <ErrorBoundary surface="Resilience">
+          <ResiliencePanel view={resilience.view} source={resilience.source} />
+        </ErrorBoundary>
       ) : null}
       {view === "temporal" ? (
-        <TemporalDriftPanel view={temporal.view} source={temporal.source} />
+        <ErrorBoundary surface="Temporal drift">
+          <TemporalDriftPanel view={temporal.view} source={temporal.source} />
+        </ErrorBoundary>
       ) : null}
     </div>
   );

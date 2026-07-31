@@ -1,31 +1,22 @@
 import type { EvaluationEvent } from "@/lib/events";
 
-type ArmSummary = {
-  median_mttr_seconds: number;
-  p90_mttr_seconds: number;
-  wrong_actions: number;
-  escalations: number;
-  failed_orders: number;
-  token_proxy_total: number;
+// Consumes the honest v2 evaluation report (schema_version "postmortem-eval-v2").
+// Only real, measured retrieval numbers are surfaced; decision-quality (MTTR,
+// wrong-action rate) is carried as a boolean "measured" flag and is false until
+// the real reasoning agent runs — the console renders "pending", never a number.
+type RetrievalSection = {
+  recall_at_1: number;
+  recall_at_5?: number;
+  recall_at_10: number;
+  ndcg_at_10: number;
+  hard_negative_count?: number;
 };
 
-type CurvePoint = {
-  occurrence: number;
-  median_mttr_seconds: number;
-};
-
-type PhaseTwoReport = {
+type EvalReportV2 = {
   generated_at: string;
   seed: number;
-  recall: { recall_at_10: number };
-  arms: {
-    cold_start: { summary: ArmSummary };
-    with_memory: { summary: ArmSummary };
-  };
-  learning_curve: {
-    cold_start: CurvePoint[];
-    with_memory: CurvePoint[];
-  };
+  retrieval: RetrievalSection;
+  decision_quality: { measured: boolean };
 };
 
 export function evaluationEventFromReport(
@@ -33,40 +24,19 @@ export function evaluationEventFromReport(
   caseId = "PHASE-2-EVAL",
 ): EvaluationEvent | null {
   if (!value || typeof value !== "object") return null;
-  const report = value as Partial<PhaseTwoReport>;
-  const cold = report.arms?.cold_start?.summary;
-  const memory = report.arms?.with_memory?.summary;
-  const recallAt10 = report.recall?.recall_at_10;
+  const report = value as Partial<EvalReportV2>;
+  const retrieval = report.retrieval;
   if (
     typeof report.seed !== "number" ||
     typeof report.generated_at !== "string" ||
-    typeof recallAt10 !== "number" ||
-    !cold ||
-    !memory ||
-    !Array.isArray(report.learning_curve?.cold_start) ||
-    !Array.isArray(report.learning_curve?.with_memory)
+    !retrieval ||
+    typeof retrieval.recall_at_1 !== "number" ||
+    typeof retrieval.recall_at_10 !== "number" ||
+    typeof retrieval.ndcg_at_10 !== "number" ||
+    typeof report.decision_quality?.measured !== "boolean"
   ) {
     return null;
   }
-
-  const memoryByOccurrence = new Map(
-    report.learning_curve.with_memory.map((point) => [
-      point.occurrence,
-      point.median_mttr_seconds,
-    ]),
-  );
-  const learningCurve = report.learning_curve.cold_start.flatMap((point) => {
-    const memoryMttrSeconds = memoryByOccurrence.get(point.occurrence);
-    return typeof memoryMttrSeconds === "number"
-      ? [
-          {
-            occurrence: point.occurrence,
-            coldMttrSeconds: point.median_mttr_seconds,
-            memoryMttrSeconds,
-          },
-        ]
-      : [];
-  });
 
   return {
     id: `phase2-eval-${report.seed}`,
@@ -77,23 +47,20 @@ export function evaluationEventFromReport(
     type: "evaluation",
     payload: {
       seed: report.seed,
-      familyCount: 10,
-      recallAt10,
-      cold: arm(cold),
-      memory: arm(memory),
-      learningCurve,
+      retrieval: {
+        recallAt1: retrieval.recall_at_1,
+        recallAt5:
+          typeof retrieval.recall_at_5 === "number"
+            ? retrieval.recall_at_5
+            : retrieval.recall_at_10,
+        recallAt10: retrieval.recall_at_10,
+        ndcgAt10: retrieval.ndcg_at_10,
+        hardNegativeCount:
+          typeof retrieval.hard_negative_count === "number"
+            ? retrieval.hard_negative_count
+            : 0,
+      },
+      decisionQualityMeasured: report.decision_quality.measured,
     },
   };
 }
-
-function arm(summary: ArmSummary) {
-  return {
-    medianMttrSeconds: summary.median_mttr_seconds,
-    p90MttrSeconds: summary.p90_mttr_seconds,
-    wrongActions: summary.wrong_actions,
-    escalations: summary.escalations,
-    failedOrders: summary.failed_orders,
-    tokenProxy: summary.token_proxy_total,
-  };
-}
-

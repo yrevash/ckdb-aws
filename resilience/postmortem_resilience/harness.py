@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from . import db, region_control
+from .leaseholders import (
+    DEFAULT_PIN_POLL_INTERVAL_S,
+    DEFAULT_PIN_TIMEOUT_S,
+    pin_and_verify,
+    resolve_node_from_locality,
+)
 from .probes import (
     RpoTracker,
     probe_atomicity,
@@ -33,6 +39,14 @@ from .topology import (
     nodes_in_region,
 )
 
+# Tables the RPO tracker touches directly (episodic memory + the operational
+# table the atomicity probe pairs it with). These are the tables pinned into
+# the kill region before every run so the kill actually exercises their
+# leaseholders -- see leaseholders.py's module docstring for why this is
+# necessary and db/bootstrap/010_multiregion.sql's REGIONAL BY TABLE IN
+# PRIMARY REGION default never would.
+PINNED_TABLES: tuple[str, ...] = ("episodic_events", "remediation_actions")
+
 
 @dataclass
 class HarnessConfig:
@@ -43,6 +57,9 @@ class HarnessConfig:
     region_down_wait_seconds: float = 15.0
     recovery_timeout_seconds: float = 150.0
     extra_writes_during_outage: int = 2
+    pinned_tables: tuple[str, ...] = PINNED_TABLES
+    leaseholder_pin_timeout_seconds: float = DEFAULT_PIN_TIMEOUT_S
+    leaseholder_pin_poll_interval_seconds: float = DEFAULT_PIN_POLL_INTERVAL_S
 
 
 class ResilienceHarness:
@@ -67,6 +84,41 @@ class ResilienceHarness:
 
         tracker = RpoTracker()
 
+        # --- pin leaseholders into the kill region, BEFORE the kill (R5) --
+        # db/bootstrap/010_multiregion.sql sets every table to REGIONAL BY
+        # TABLE IN PRIMARY REGION, which never moves a leaseholder when a
+        # non-primary region (the kill target) goes down -- that is the
+        # exact bug the audit found (killed region owned zero leaseholders,
+        # so the "RTO" was a normal write to an untouched node). This
+        # overrides just the lease preference for the tables this harness
+        # actually probes, and verifies via SHOW RANGES that the move
+        # really happened before proceeding -- raises LeaseholderPinError
+        # (aborting the run) rather than silently continuing to kill a
+        # region that doesn't hold what this proof needs it to hold.
+        leaseholder_pin = pin_and_verify(
+            control, tables=cfg.pinned_tables, region=cfg.kill_region,
+            timeout_s=cfg.leaseholder_pin_timeout_seconds,
+            poll_interval_s=cfg.leaseholder_pin_poll_interval_seconds,
+        )
+
+        # The exact node holding episodic_events' leaseholder right now
+        # (i.e. immediately pre-kill) -- probe_rto uses this to guarantee
+        # its first write attempt targets the about-to-be-dead leaseholder.
+        episodic_locality = leaseholder_pin["episodic_events"]["sample_leaseholder_locality"]
+        leaseholder_node = resolve_node_from_locality(episodic_locality) if episodic_locality else None
+        if leaseholder_node is None:
+            raise RuntimeError(
+                "could not resolve a concrete node from the pinned "
+                f"episodic_events leaseholder locality {episodic_locality!r} -- "
+                "refusing to proceed without a guaranteed real-leaseholder RTO probe."
+            )
+        if leaseholder_node.region != cfg.kill_region:
+            raise RuntimeError(
+                f"episodic_events leaseholder resolved to {leaseholder_node.service!r} "
+                f"in region {leaseholder_node.region!r}, not the kill region "
+                f"{cfg.kill_region!r} -- pin verification should have caught this."
+            )
+
         # --- pre-kill baseline -----------------------------------------
         liveness_before = region_control.node_status(query_node=control)
         live_before = region_control.count_live(liveness_before)
@@ -76,19 +128,25 @@ class ResilienceHarness:
             write_node=control, read_node=third_region_node, seed=seed
         )
         tracker.track(table="episodic_events", id_column="event_id",
-                      row_id=freshness.details["event_id"], org_id=seed.org_id)
+                      row_id=freshness.details["event_id"], org_id=seed.org_id,
+                      content_column="content", expected_content=freshness.details["content"])
 
         cross_agent = probe_cross_agent_visibility(
             writer_node=kill_region_nodes[0], reader_node=control, seed=seed
         )
         tracker.track(table="episodic_events", id_column="event_id",
-                      row_id=cross_agent.details["event_id"], org_id=seed.org_id)
+                      row_id=cross_agent.details["event_id"], org_id=seed.org_id,
+                      content_column="content", expected_content=cross_agent.details["content"])
 
         atomicity = probe_atomicity(node=control, seed=seed)
         tracker.track(table="episodic_events", id_column="event_id",
-                      row_id=atomicity.details["commit_path"]["event_id"], org_id=seed.org_id)
+                      row_id=atomicity.details["commit_path"]["event_id"], org_id=seed.org_id,
+                      content_column="content",
+                      expected_content=atomicity.details["commit_path"]["event_content"])
         tracker.track(table="remediation_actions", id_column="action_id",
-                      row_id=atomicity.details["commit_path"]["action_id"], org_id=seed.org_id)
+                      row_id=atomicity.details["commit_path"]["action_id"], org_id=seed.org_id,
+                      content_column="idempotency_key",
+                      expected_content=atomicity.details["commit_path"]["action_idempotency_key"])
 
         # --- the kill ----------------------------------------------------
         kill_started_at = region_control.kill_region(cfg.kill_region)
@@ -97,6 +155,8 @@ class ResilienceHarness:
             kill_started_at=kill_started_at,
             candidate_nodes=TOPOLOGY,
             seed=seed,
+            kill_region=cfg.kill_region,
+            leaseholder_node=leaseholder_node,
             target_seconds=cfg.target_rto_seconds,
             deadline_seconds=cfg.rto_deadline_seconds,
             tracker=tracker,
@@ -109,6 +169,7 @@ class ResilienceHarness:
             extra_conn = db.connect(control)
             try:
                 extra_event_id = str(uuid4())
+                extra_content = "resilience harness: write during outage"
                 with extra_conn.cursor() as cur:
                     cur.execute(
                         """
@@ -116,15 +177,16 @@ class ResilienceHarness:
                             event_id, org_id, agent_id, incident_id, service_id,
                             event_type, content
                         )
-                        VALUES (%s, %s, %s, %s, %s, 'observation', 'resilience harness: write during outage')
+                        VALUES (%s, %s, %s, %s, %s, 'observation', %s)
                         """,
                         (extra_event_id, seed.org_id, seed.agent_id,
-                         seed.incident_id, seed.service_id),
+                         seed.incident_id, seed.service_id, extra_content),
                     )
                 extra_conn.commit()
                 outage_writes.append(extra_event_id)
                 tracker.track(table="episodic_events", id_column="event_id",
-                              row_id=extra_event_id, org_id=seed.org_id)
+                              row_id=extra_event_id, org_id=seed.org_id,
+                              content_column="content", expected_content=extra_content)
             finally:
                 extra_conn.close()
 
@@ -140,6 +202,14 @@ class ResilienceHarness:
         live_during = region_control.count_live(liveness_during)
         ranges_during = range_snapshot(control)
 
+        # --- RPO verification DURING the outage (R5: "verify data during
+        # the outage", not only after recovery) -- the killed region is
+        # still down at this point (restore_region has not been called
+        # yet); every row tracked so far (including the RTO probe's
+        # post-failover write and the outage writes above) must already be
+        # present, with matching content, on a surviving node. ------------
+        rpo_during_outage = probe_rpo(node=control, tracker=tracker, phase="during_outage")
+
         # --- restore -------------------------------------------------
         region_control.restore_region(cfg.kill_region)
         recovered, recovery_elapsed_s, liveness_after = region_control.wait_for_full_liveness(
@@ -150,16 +220,17 @@ class ResilienceHarness:
         live_after = region_control.count_live(liveness_after)
         ranges_after = range_snapshot(control)
 
-        # --- RPO verification (after recovery, but the rows written
-        # during the outage were already durable the moment they
-        # committed -- this just re-confirms nothing was silently lost) --
-        rpo = probe_rpo(node=control, tracker=tracker)
+        # --- RPO verification after recovery (the canonical, final result
+        # -- rows written during the outage were already durable the
+        # moment they committed and already re-confirmed above; this
+        # re-checks once more now that the killed region has rejoined) ----
+        rpo = probe_rpo(node=control, tracker=tracker, phase="after_recovery")
 
         # --- persist probes into eval_probes (belt-and-suspenders: the
         # proof lives in the database, not only in the JSON file) -------
         record_conn = db.connect(control)
         try:
-            for probe in (freshness, cross_agent, atomicity, rto, rpo):
+            for probe in (freshness, cross_agent, atomicity, rto, rpo_during_outage, rpo):
                 record_probe(record_conn, seed.org_id, probe)
         finally:
             record_conn.close()
@@ -169,6 +240,7 @@ class ResilienceHarness:
             "cross_agent_visibility": cross_agent,
             "atomicity": atomicity,
             "rto": rto,
+            "rpo_during_outage": rpo_during_outage,
             "rpo": rpo,
         }
 
@@ -190,6 +262,7 @@ class ResilienceHarness:
                 "rows_tracked_for_rpo": len(tracker),
             },
             probes={name: p.to_dict() for name, p in probes_by_name.items()},
+            leaseholder_pin=leaseholder_pin,
             node_liveness={
                 "before_kill": live_before,
                 "during_outage": live_during,

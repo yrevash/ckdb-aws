@@ -2847,3 +2847,45 @@ a:focus-visible {
     transform: none;
   }
 }
+
+/* Honest error-boundary fallback (Reality Charter R6): show nothing fabricated. */
+.surface-error {
+  margin: 2rem auto;
+  max-width: 32rem;
+  padding: 1.5rem 1.75rem;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.surface-error strong {
+  font-size: 1rem;
+}
+
+.surface-error p {
+  margin: 0;
+  opacity: 0.75;
+  font-size: 0.875rem;
+}
+
+.surface-error button {
+  align-self: flex-start;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* A region observed to be down/degraded in a real failover event. */
+.region--down .region__dot {
+  background: #f0546d;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #f0546d 25%, transparent);
+}

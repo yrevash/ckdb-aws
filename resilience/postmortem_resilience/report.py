@@ -59,6 +59,13 @@ class ResilienceReport:
     node_liveness: dict[str, int]
     range_snapshot: dict[str, Any]
     overall: dict[str, Any]
+    # Pin+verify results (see leaseholders.pin_and_verify): proof that the
+    # probed tables' leaseholders were actually moved into the region about
+    # to be killed, BEFORE the kill -- the mechanical fix for the audit
+    # finding that the killed region owned zero leaseholders. Defaults to
+    # {} so existing callers/tests that construct a ResilienceReport without
+    # this field (e.g. resilience/tests/test_report.py) keep working.
+    leaseholder_pin: dict[str, Any] = field(default_factory=dict)
     schema_version: str = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:

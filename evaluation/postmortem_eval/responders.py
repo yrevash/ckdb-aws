@@ -14,6 +14,14 @@ from .contracts import ActionPlan, ResponderDecision, RetrievalHit
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
 DEFAULT_MATCH_THRESHOLD = 0.15
+
+# Decision latency (seconds spent "thinking" before acting) is a property of
+# the *reasoning agent*, not of this deterministic mechanism harness. Under the
+# Reality Charter (R7) it may only be measured by the real Bedrock agent, so the
+# deterministic responders below report a single fixed, non-informative value and
+# never a per-occurrence ramp. See docs/reality/00-reality-charter.md.
+DECISION_LATENCY_NOT_MEASURED = 0
+
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 STOP_WORDS = {
     "a",
@@ -75,7 +83,6 @@ class ProceduralMemoryResponder:
         )
         self.retrieval_k = retrieval_k
         self.match_threshold = match_threshold
-        self._memory_use_count: dict[str, int] = {}
 
     def decide(self, observation: IncidentObservation) -> ResponderDecision:
         query = tokenize(f"{observation.title} {observation.signal}")
@@ -98,16 +105,17 @@ class ProceduralMemoryResponder:
         retrieval_tokens = sum(len(tokenize(record.text)) for _, _, record in top)
         base_tokens = 220 + len(query) * 3 + retrieval_tokens
 
-        inapplicable_memory_ids: set[str] = set()
-        if "pool health confirmed" in observation.signal.lower():
-            inapplicable_memory_ids.add("mem-f2-pool")
+        # Authorization comes purely from the real ranking + similarity
+        # threshold: a candidate must clear ``match_threshold`` and carry an
+        # authorized runbook action. Non-gold reference memories (distractors
+        # and hard negatives) carry no actions, so they can pollute the ranked
+        # list -- which is exactly what depresses recall@1/nDCG -- without ever
+        # being authorized. There is no oracle-aware special case here.
         candidate = next(
             (
                 item
                 for item in top
-                if item[1] not in inapplicable_memory_ids
-                and item[0] >= self.match_threshold
-                and item[2].actions
+                if item[0] >= self.match_threshold and item[2].actions
             ),
             None,
         )
@@ -124,12 +132,9 @@ class ProceduralMemoryResponder:
                 retrieved=hits,
                 token_proxy=base_tokens + 80,
                 abstained=True,
-                decision_seconds=120,
+                decision_seconds=DECISION_LATENCY_NOT_MEASURED,
             )
 
-        prior_uses = self._memory_use_count.get(candidate[1], 0)
-        self._memory_use_count[candidate[1]] = prior_uses + 1
-        decision_seconds = (180, 60, 0)[min(prior_uses, 2)]
         rendered = tuple(
             self._render_action(action, observation)
             for action in candidate[2].actions
@@ -139,7 +144,7 @@ class ProceduralMemoryResponder:
             retrieved=hits,
             token_proxy=base_tokens + 70 * len(rendered),
             authorized_memory_id=candidate[1],
-            decision_seconds=decision_seconds,
+            decision_seconds=DECISION_LATENCY_NOT_MEASURED,
         )
 
     @staticmethod
@@ -169,43 +174,60 @@ class ProceduralMemoryResponder:
         return ActionPlan(action.action_type, target, params)
 
 
-class ColdStartResponder:
-    """Signal-driven baseline with no persistent incident memory."""
+class MemorylessBaselineResponder:
+    """Competent memoryless baseline (Reality Charter R2).
 
-    name = "cold_start"
+    A fair comparison arm: it has *no* persistent incident memory, but it is
+    not handicapped. It reads the current incident signal and applies the best
+    honest first-line remediation a competent on-call engineer would reach for
+    from generic runbook knowledge -- and it correctly *abstains* (pages a
+    human) when the signal is ambiguous or unrecognized rather than guessing.
+    It never plays a deliberately-wrong action to flatter the memory arm.
+
+    Because the deterministic simulator's oracle only resolves an incident when
+    the exact tuned remediation is applied, a competent baseline that reads the
+    signal well resolves the same incidents the memory arm does. That is the
+    honest finding of a deterministic harness: it cannot, on its own,
+    demonstrate that memory improves decision quality. Any such claim (MTTR
+    delta, first-action accuracy, wrong-action rate) is deferred to the real
+    Bedrock agent run per R7 and is reported as ``pending_real_agent_run``.
+    """
+
+    name = "competent_baseline"
 
     def decide(self, observation: IncidentObservation) -> ResponderDecision:
         signal = observation.signal.lower()
         target = observation.service
-        wrong_scale = ActionPlan(
-            "scale_service",
-            target,
-            {"capacity_units": 12},
+        actions = self._first_line_remediation(signal, target, observation)
+        query_tokens = len(tokenize(f"{observation.title} {observation.signal}"))
+        return ResponderDecision(
+            actions=actions,
+            token_proxy=280 + query_tokens * 4 + len(actions) * 70,
+            abstained=actions[-1].action_type == "no_op_page_human",
+            decision_seconds=DECISION_LATENCY_NOT_MEASURED,
         )
-        wrong_restart = ActionPlan("restart_service", target, {})
 
+    @staticmethod
+    def _first_line_remediation(
+        signal: str, target: str, observation: IncidentObservation
+    ) -> tuple[ActionPlan, ...]:
         if "after deploy" in signal:
-            actions = (
-                wrong_scale,
+            return (
                 ActionPlan(
                     "rollback_deploy",
                     target,
                     {"target_version": observation.previous_stable_version},
                 ),
             )
-        elif "too many connections" in signal:
-            actions = (
-                wrong_scale,
+        if "too many connections" in signal:
+            return (
                 ActionPlan(
-                    "set_config",
-                    target,
-                    {"key": "db_pool_size", "value": 80},
+                    "set_config", target, {"key": "db_pool_size", "value": 80}
                 ),
                 ActionPlan("restart_service", target, {}),
             )
-        elif "cache timeout cascade" in signal:
-            actions = (
-                wrong_restart,
+        if "cache timeout cascade" in signal:
+            return (
                 ActionPlan(
                     "failover_dependency",
                     target,
@@ -215,34 +237,27 @@ class ColdStartResponder:
                     },
                 ),
             )
-        elif "traffic spike saturated" in signal:
-            actions = (
+        if "traffic spike saturated" in signal:
+            return (
                 ActionPlan("scale_service", target, {"capacity_units": 8}),
-                ActionPlan(
-                    "throttle_traffic", target, {"traffic_percent": 75}
-                ),
+                ActionPlan("throttle_traffic", target, {"traffic_percent": 75}),
             )
-        elif "retry storm" in signal:
-            actions = (
-                wrong_scale,
-                ActionPlan(
-                    "throttle_traffic", target, {"traffic_percent": 60}
-                ),
+        if "retry storm" in signal:
+            return (
+                ActionPlan("throttle_traffic", target, {"traffic_percent": 60}),
             )
-        elif "memory leak" in signal:
-            actions = (ActionPlan("restart_service", target, {}),)
-        elif "config flag" in signal:
-            actions = (
-                wrong_scale,
+        if "memory leak" in signal:
+            return (ActionPlan("restart_service", target, {}),)
+        if "config flag" in signal:
+            return (
                 ActionPlan(
                     "set_config",
                     target,
                     {"key": "express_checkout_enabled", "value": False},
                 ),
             )
-        elif "datastore primary" in signal:
-            actions = (
-                wrong_restart,
+        if "datastore primary" in signal:
+            return (
                 ActionPlan(
                     "failover_dependency",
                     target,
@@ -252,9 +267,8 @@ class ColdStartResponder:
                     },
                 ),
             )
-        elif "payment provider" in signal:
-            actions = (
-                wrong_restart,
+        if "payment provider" in signal:
+            return (
                 ActionPlan(
                     "failover_dependency",
                     target,
@@ -263,17 +277,9 @@ class ColdStartResponder:
                         "to_service": "payment-provider-secondary",
                     },
                 ),
-                ActionPlan(
-                    "throttle_traffic", target, {"traffic_percent": 50}
-                ),
+                ActionPlan("throttle_traffic", target, {"traffic_percent": 50}),
             )
-        else:
-            actions = (ActionPlan("no_op_page_human", target, {}),)
-
-        query_tokens = len(tokenize(f"{observation.title} {observation.signal}"))
-        return ResponderDecision(
-            actions=actions,
-            token_proxy=650 + query_tokens * 5 + len(actions) * 120,
-            abstained=actions[-1].action_type == "no_op_page_human",
-            decision_seconds=240,
-        )
+        # Ambiguous / unrecognized signal (novel families, and near-misses such
+        # as a slow-query plan that merely resembles pool pressure): a competent
+        # engineer does not guess -- they page a human.
+        return (ActionPlan("no_op_page_human", target, {}),)

@@ -15,6 +15,12 @@ export const PHASE_TWO_EVENTS: readonly ConsoleEvent[] = [
       severity: "SEV-1",
       status: "open",
       summary: "p99 latency 4.2s · error rate 18.4% after deploy #5120",
+      telemetry: {
+        p99LatencyMs: 4200,
+        errorRatePct: 18.4,
+        deploy: "#5120",
+        errorBudgetBurnRate: 16.2,
+      },
     },
   },
   {
@@ -193,29 +199,16 @@ export const PHASE_TWO_EVENTS: readonly ConsoleEvent[] = [
     type: "evaluation",
     payload: {
       seed: 20260730,
-      familyCount: 10,
-      recallAt10: 0.97,
-      cold: {
-        medianMttrSeconds: 660,
-        p90MttrSeconds: 780,
-        wrongActions: 20,
-        escalations: 3,
-        failedOrders: 197,
-        tokenProxy: 27095,
+      // Real, measured retrieval numbers (offline replay mirrors the v2 report).
+      retrieval: {
+        recallAt1: 0.85,
+        recallAt5: 1.0,
+        recallAt10: 1.0,
+        ndcgAt10: 0.94,
+        hardNegativeCount: 9,
       },
-      memory: {
-        medianMttrSeconds: 240,
-        p90MttrSeconds: 420,
-        wrongActions: 0,
-        escalations: 3,
-        failedOrders: 157,
-        tokenProxy: 14031,
-      },
-      learningCurve: [
-        { occurrence: 1, coldMttrSeconds: 660, memoryMttrSeconds: 300 },
-        { occurrence: 2, coldMttrSeconds: 660, memoryMttrSeconds: 180 },
-        { occurrence: 3, coldMttrSeconds: 660, memoryMttrSeconds: 120 },
-      ],
+      // Decision quality is NOT measured yet (needs the real agent).
+      decisionQualityMeasured: false,
     },
   },
 ];

@@ -68,6 +68,7 @@ def probe_freshness(*, write_node: Node, read_node: Node, seed: SeedContext) -> 
         unit="ms",
         details={
             "event_id": event_id,
+            "content": marker,
             "write_node": write_node.service,
             "read_node": read_node.service,
             "same_node": write_node.service == read_node.service,

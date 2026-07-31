@@ -13,8 +13,9 @@ from postmortem_sim.models import IncidentObservation
 
 from .contracts import Responder, TemporalValidityRecord
 from .responders import (
+    DECISION_LATENCY_NOT_MEASURED,
     DEFAULT_MATCH_THRESHOLD,
-    ColdStartResponder,
+    MemorylessBaselineResponder,
     ProceduralMemoryResponder,
     tokenize,
 )
@@ -23,13 +24,15 @@ from .contracts import ActionPlan, ResponderDecision, RetrievalHit
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_VERSION = "postmortem-eval-v1"
+SCHEMA_VERSION = "postmortem-eval-v2"
 TOKEN_COST_PROXY_USD = 0.000003
 
-# Track B: bitemporal temporal-drift evaluation fixtures. Kept fully separate
-# from the Phase 2 default scenario/oracle/corpus fixtures above so the
-# value-locked Phase 2 numbers (recall@10, exact query counts, MTTR deltas,
-# ...) are never perturbed by this additive evaluation.
+# Provenance tag attached to every REAL number this harness emits (Reality
+# Charter R1/R9): the named, reproducible command that produced it.
+PRODUCED_BY = "python -m postmortem_eval (evaluation/postmortem_eval/runner.py)"
+
+# Temporal-drift fixtures (bitemporal recall). Isolated from the Phase 2
+# default scenario/oracle/corpus fixtures.
 DRIFT_SCENARIO_PATH = REPO_ROOT / "simulator" / "fixtures" / "drift_scenarios.json"
 DRIFT_ORACLE_PATH = REPO_ROOT / "simulator" / "fixtures" / "drift_oracles.json"
 DRIFT_CORPUS_PATH = FIXTURE_ROOT / "drift_memory_corpus.json"
@@ -59,7 +62,24 @@ class IncidentResult:
 
 
 class EvaluationHarness:
-    """Controlled A/B replay over identical deterministic incident streams."""
+    """Controlled replay over a deterministic incident stream.
+
+    Emits three kinds of results, each tagged with how it was produced
+    (Reality Charter R1/R7/R9):
+
+    * ``retrieval`` -- REAL today. recall@k / precision / nDCG of the memory
+      ranker over a corpus that contains hard negatives (semantically close but
+      wrong prior incidents). No model required; expected < 1.0.
+    * ``temporal_validity`` -- REAL today. Whether the bitemporal-aware ranker
+      selects the currently-valid fact, scored against an INDEPENDENT
+      ground-truth (the simulator oracle's required action), not against the
+      responder's own validity predicate.
+    * ``decision_quality`` -- PENDING the real Bedrock agent run. MTTR delta,
+      first-action accuracy and wrong-action rate are agent decision-quality
+      metrics; a deterministic responder cannot measure them (R7). The
+      deterministic arms are retained only as a mechanism/regression check and
+      are explicitly NOT a performance comparison.
+    """
 
     def __init__(
         self,
@@ -75,11 +95,17 @@ class EvaluationHarness:
         self.retrieval_k = retrieval_k
         corpus = json.loads(self.corpus_path.read_text())
         self.gold_by_family: dict[str, set[str]] = {}
+        self.hard_negative_ids: set[str] = set()
+        self.distractor_ids: set[str] = set()
         for item in corpus["memories"]:
             if item.get("gold", False):
                 self.gold_by_family.setdefault(item["family_id"], set()).add(
                     item["memory_id"]
                 )
+            elif item["family_id"] == "HARD_NEGATIVE":
+                self.hard_negative_ids.add(item["memory_id"])
+            else:
+                self.distractor_ids.add(item["memory_id"])
 
     def run(self) -> dict[str, Any]:
         memory_results, memory_seed = self._run_arm(
@@ -88,41 +114,20 @@ class EvaluationHarness:
                 retrieval_k=self.retrieval_k,
             )
         )
-        cold_results, cold_seed = self._run_arm(ColdStartResponder())
-        if memory_seed != cold_seed:
-            raise AssertionError("A/B arms did not use the same simulator seed")
+        baseline_results, baseline_seed = self._run_arm(
+            MemorylessBaselineResponder()
+        )
+        if memory_seed != baseline_seed:
+            raise AssertionError("arms did not use the same simulator seed")
         if [item.scenario_id for item in memory_results] != [
-            item.scenario_id for item in cold_results
+            item.scenario_id for item in baseline_results
         ]:
-            raise AssertionError("A/B arms did not replay the same scenario stream")
+            raise AssertionError("arms did not replay the same scenario stream")
         if [item.incident_id for item in memory_results] != [
-            item.incident_id for item in cold_results
+            item.incident_id for item in baseline_results
         ]:
-            raise AssertionError("A/B arms produced different deterministic IDs")
+            raise AssertionError("arms produced different deterministic IDs")
 
-        memory_summary = self._summarize(memory_results)
-        cold_summary = self._summarize(cold_results)
-        recall = self._recall_metrics(memory_results)
-        comparison = {
-            "median_mttr_reduction_percent": self._reduction(
-                cold_summary["median_mttr_seconds"],
-                memory_summary["median_mttr_seconds"],
-            ),
-            "failed_orders_avoided": (
-                cold_summary["failed_orders"] - memory_summary["failed_orders"]
-            ),
-            "failed_order_value_avoided_cents": (
-                cold_summary["failed_order_value_cents"]
-                - memory_summary["failed_order_value_cents"]
-            ),
-            "wrong_actions_avoided": (
-                cold_summary["wrong_actions"] - memory_summary["wrong_actions"]
-            ),
-            "token_proxy_reduction_percent": self._reduction(
-                cold_summary["token_proxy_total"],
-                memory_summary["token_proxy_total"],
-            ),
-        }
         report: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": "2026-07-30T00:00:00Z",
@@ -131,36 +136,23 @@ class EvaluationHarness:
                 "controlled_variable": "persistent procedural memory enabled",
                 "scenario_stream_identical": True,
                 "simulated_clock": True,
-                "token_cost_proxy_usd_per_token": TOKEN_COST_PROXY_USD,
                 "retrieval_k": self.retrieval_k,
                 "abstention_match_threshold": DEFAULT_MATCH_THRESHOLD,
-                "decision_time_model": {
-                    "with_memory_seconds_by_use": [180, 60, 0],
-                    "cold_start_seconds": 240,
+                "token_cost_proxy_usd_per_token": TOKEN_COST_PROXY_USD,
+                "corpus": {
+                    "gold_memories": sum(
+                        len(ids) for ids in self.gold_by_family.values()
+                    ),
+                    "hard_negatives": len(self.hard_negative_ids),
+                    "distractors": len(self.distractor_ids),
                 },
             },
-            "recall": recall,
-            "learning_curve": {
-                "with_memory": self._learning_curve(memory_results),
-                "cold_start": self._learning_curve(cold_results),
-            },
-            "arms": {
-                "with_memory": {
-                    "summary": memory_summary,
-                    "incidents": [
-                        self._incident_dict(item) for item in memory_results
-                    ],
-                },
-                "cold_start": {
-                    "summary": cold_summary,
-                    "incidents": [
-                        self._incident_dict(item) for item in cold_results
-                    ],
-                },
-            },
-            "comparison": comparison,
+            "retrieval": self._retrieval_metrics(memory_results),
+            "temporal_validity": self._run_temporal_validity(),
+            "decision_quality": self._decision_quality(
+                memory_results, baseline_results
+            ),
         }
-        report["temporal_drift"] = self._run_temporal_drift()
         return report
 
     def write_json(self, output_path: Path | str) -> dict[str, Any]:
@@ -266,141 +258,32 @@ class EvaluationHarness:
             kwargs["oracle_path"] = self.oracle_path
         return Conductor.from_files(**kwargs)
 
-    def _run_temporal_drift(self) -> dict[str, Any]:
-        """Replay the bitemporal temporal-drift families end to end and score
-        whether the memory arm applied the fix that is actually valid at each
-        incident's decision time, versus a fix that has since been
-        superseded. Fully additive: uses its own isolated scenario/oracle/
-        corpus fixtures (simulator/fixtures/drift_*.json,
-        evaluation/fixtures/drift_memory_corpus.json), so it never touches
-        the Phase 2 default fixture stream or its value-locked metrics.
-        """
+    # ---- REAL: retrieval quality over hard negatives -------------------
 
-        corpus = json.loads(DRIFT_CORPUS_PATH.read_text())
-        validity_by_memory: dict[str, tuple[datetime | None, datetime | None]] = {}
-        families: dict[str, list[str]] = {}
-        for item in corpus["memories"]:
-            if not item.get("gold", False):
-                continue
-            validity_by_memory[item["memory_id"]] = (
-                _parse_ts(item.get("valid_from")),
-                _parse_ts(item.get("valid_to")),
-            )
-            families.setdefault(item["family_id"], []).append(item["memory_id"])
-
-        responder = TemporalProceduralMemoryResponder(
-            DRIFT_CORPUS_PATH, retrieval_k=self.retrieval_k
-        )
-        fixture = json.loads(DRIFT_SCENARIO_PATH.read_text())
-        oracle = json.loads(DRIFT_ORACLE_PATH.read_text())
-        conductor = Conductor(fixture, oracle)
-
-        records: list[TemporalValidityRecord] = []
-        while conductor.remaining_scenarios:
-            incident = conductor.inject_next()
-            observation = conductor.observe_incident(incident.incident_id)
-            decision = responder.decide(observation)
-            conductor.advance_time(decision.decision_seconds)
-
-            for action in decision.actions:
-                result = conductor.apply_action(
-                    incident.incident_id,
-                    action.action_type,
-                    action.target_service,
-                    action.params,
-                    memory_ref=(
-                        f"memory:{decision.authorized_memory_id}"
-                        if decision.authorized_memory_id
-                        else None
-                    ),
-                )
-                if result.resolved:
-                    break
-
-            as_of = observation.observed_at
-            candidates = families.get(incident.family_id, [])
-            expected_id = next(
-                (
-                    memory_id
-                    for memory_id in candidates
-                    if _is_valid_at(validity_by_memory[memory_id], as_of)
-                ),
-                None,
-            )
-            stale_ids = {memory_id for memory_id in candidates if memory_id != expected_id}
-            authorized = decision.authorized_memory_id
-            records.append(
-                TemporalValidityRecord(
-                    scenario_id=incident.scenario_id,
-                    family_id=incident.family_id,
-                    variant_id=incident.variant_id,
-                    observed_at=as_of.isoformat() if as_of else None,
-                    authorized_memory_id=authorized,
-                    expected_memory_id=expected_id,
-                    applied_currently_valid_fix=authorized == expected_id,
-                    applied_stale_fact=authorized in stale_ids,
-                    resolved=incident.mttr_seconds is not None,
-                    mttr_seconds=incident.mttr_seconds,
-                )
-            )
-
-        total = len(records)
-        correct = sum(item.applied_currently_valid_fix for item in records)
-        stale = sum(item.applied_stale_fact for item in records)
-        accuracy = round(correct / total, 6) if total else 0.0
-        return {
-            "families": sorted(families.keys()),
-            "incidents_evaluated": total,
-            "temporal_validity_accuracy": accuracy,
-            "stale_fact_applications": stale,
-            "target_temporal_validity_accuracy": TEMPORAL_VALIDITY_TARGET,
-            "target_stale_fact_applications": STALE_FACT_TARGET,
-            "meets_target": (
-                accuracy >= TEMPORAL_VALIDITY_TARGET and stale == STALE_FACT_TARGET
-            ),
-            # Drift learning view: per-incident record of which fact was
-            # currently valid versus which one the memory arm actually
-            # applied -- the console/audit surface for "the agent noticed the
-            # environment changed and stopped using the stale fix".
-            "incidents": [asdict(item) for item in records],
-        }
-
-    def _summarize(self, results: list[IncidentResult]) -> dict[str, Any]:
-        mttr = [item.mttr_seconds for item in results]
-        tokens = sum(item.token_proxy for item in results)
-        return {
-            "incidents": len(results),
-            "resolved": len(results),
-            "median_mttr_seconds": statistics.median(mttr),
-            "p90_mttr_seconds": self._percentile(mttr, 0.9),
-            "mean_actions_to_resolution": round(
-                statistics.mean(item.actions for item in results), 3
-            ),
-            "first_action_accuracy": round(
-                statistics.mean(item.first_action_correct for item in results),
-                6,
-            ),
-            "wrong_actions": sum(item.wrong_actions for item in results),
-            "escalations": sum(item.escalated for item in results),
-            "failed_orders": sum(item.failed_orders for item in results),
-            "failed_order_value_cents": sum(
-                item.failed_order_value_cents for item in results
-            ),
-            "token_proxy_total": tokens,
-            "token_proxy_mean": round(tokens / len(results), 3),
-            "cost_proxy_usd": round(tokens * TOKEN_COST_PROXY_USD, 6),
-        }
-
-    def _recall_metrics(
+    def _retrieval_metrics(
         self, results: list[IncidentResult]
     ) -> dict[str, Any]:
+        """Real recall@k / precision / nDCG of the memory ranker.
+
+        Scored against the labeled gold memory for each incident family over a
+        corpus that includes hard negatives. Gold is no longer trivially the
+        only in-family record, so these numbers are expected to sit below 1.0 --
+        that is the correct, honest measurement, not a defect.
+        """
+
         scored = [
             item
             for item in results
             if item.family_id in self.gold_by_family
             and item.variant_id != "red-herring-slow-query"
         ]
-        metrics: dict[str, Any] = {"queries": len(scored)}
+        metrics: dict[str, Any] = {
+            "status": "measured",
+            "produced_by": PRODUCED_BY,
+            "corpus_has_hard_negatives": True,
+            "hard_negative_count": len(self.hard_negative_ids),
+            "queries": len(scored),
+        }
         for k in (1, 5, 10):
             hits = sum(
                 bool(
@@ -433,6 +316,7 @@ class EvaluationHarness:
         metrics["ndcg_at_10"] = round(statistics.mean(ndcg_values), 6)
 
         novel = [item for item in results if item.family_id == "F10_NOVEL"]
+        metrics["novel_queries"] = len(novel)
         metrics["abstention_accuracy"] = round(
             statistics.mean(item.abstained for item in novel), 6
         )
@@ -450,6 +334,9 @@ class EvaluationHarness:
             ),
             6,
         )
+        # The near-miss must be rejected by the real similarity threshold, not
+        # by a fixture-tuned phrase test. This rate confirms the pool runbook is
+        # never authorized on the slow-query near-miss.
         metrics["pool_runbook_near_miss_authorization_rate"] = round(
             statistics.mean(
                 item.authorized_memory_id == "mem-f2-pool"
@@ -459,48 +346,211 @@ class EvaluationHarness:
         )
         return metrics
 
-    def _learning_curve(
-        self, results: list[IncidentResult]
-    ) -> list[dict[str, Any]]:
-        curve: list[dict[str, Any]] = []
-        occurrences = sorted(
-            {
-                item.occurrence
-                for item in results
-                if item.family_id != "F10_NOVEL"
-            }
-        )
-        for occurrence in occurrences:
-            group = [
-                item
-                for item in results
-                if item.family_id != "F10_NOVEL"
-                and item.occurrence == occurrence
+    # ---- REAL: temporal validity, scored against an independent oracle ---
+
+    def _run_temporal_validity(self) -> dict[str, Any]:
+        """Replay the bitemporal temporal-drift families and score whether the
+        memory arm applied the fact that is actually valid at each incident's
+        decision time.
+
+        Independence (Reality Charter, fix E5): ``expected_memory_id`` is derived
+        from the *simulator oracle's* ground-truth required action for that
+        scenario -- i.e. the remediation that actually resolves the incident in
+        the world -- and matched to the candidate memory that carries it. It is
+        NOT computed by re-running the responder's own valid_from/valid_to
+        predicate. The responder reaches its answer through the bitemporal
+        window filter; the expected answer is reached through the oracle. Two
+        independent derivations that must agree, so a broken validity window is
+        caught rather than masked.
+        """
+
+        corpus = json.loads(DRIFT_CORPUS_PATH.read_text())
+        candidate_actions: dict[str, list[tuple[str, tuple]]] = {}
+        families: dict[str, list[str]] = {}
+        for item in corpus["memories"]:
+            if not item.get("gold", False):
+                continue
+            candidate_actions[item["memory_id"]] = [
+                _action_signature(action["action_type"], action.get("params", {}))
+                for action in item.get("actions", [])
             ]
-            curve.append(
-                {
-                    "occurrence": occurrence,
-                    "incidents": len(group),
-                    "median_mttr_seconds": statistics.median(
-                        item.mttr_seconds for item in group
+            families.setdefault(item["family_id"], []).append(item["memory_id"])
+
+        oracle = json.loads(DRIFT_ORACLE_PATH.read_text())
+        fixture = json.loads(DRIFT_SCENARIO_PATH.read_text())
+        responder = TemporalProceduralMemoryResponder(
+            DRIFT_CORPUS_PATH, retrieval_k=self.retrieval_k
+        )
+        conductor = Conductor(fixture, oracle)
+
+        records: list[TemporalValidityRecord] = []
+        while conductor.remaining_scenarios:
+            incident = conductor.inject_next()
+            observation = conductor.observe_incident(incident.incident_id)
+            decision = responder.decide(observation)
+            conductor.advance_time(decision.decision_seconds)
+
+            for action in decision.actions:
+                result = conductor.apply_action(
+                    incident.incident_id,
+                    action.action_type,
+                    action.target_service,
+                    action.params,
+                    memory_ref=(
+                        f"memory:{decision.authorized_memory_id}"
+                        if decision.authorized_memory_id
+                        else None
                     ),
-                    "p90_mttr_seconds": self._percentile(
-                        [item.mttr_seconds for item in group],
-                        0.9,
-                    ),
-                    "first_action_accuracy": round(
-                        statistics.mean(
-                            item.first_action_correct for item in group
-                        ),
-                        6,
-                    ),
-                    "mean_actions_to_resolution": round(
-                        statistics.mean(item.actions for item in group),
-                        6,
-                    ),
-                }
+                )
+                if result.resolved:
+                    break
+
+            # INDEPENDENT ground truth: the oracle's required remediation for
+            # this scenario, matched to the candidate memory that carries it.
+            required = _oracle_required_signature(
+                oracle, incident.scenario_id, incident.family_id
             )
-        return curve
+            candidates = families.get(incident.family_id, [])
+            expected_id = next(
+                (
+                    memory_id
+                    for memory_id in candidates
+                    if candidate_actions.get(memory_id) == required
+                ),
+                None,
+            )
+            stale_ids = {
+                memory_id for memory_id in candidates if memory_id != expected_id
+            }
+            authorized = decision.authorized_memory_id
+            records.append(
+                TemporalValidityRecord(
+                    scenario_id=incident.scenario_id,
+                    family_id=incident.family_id,
+                    variant_id=incident.variant_id,
+                    observed_at=observation.observed_at.isoformat()
+                    if observation.observed_at
+                    else None,
+                    authorized_memory_id=authorized,
+                    expected_memory_id=expected_id,
+                    applied_currently_valid_fix=authorized == expected_id,
+                    applied_stale_fact=authorized in stale_ids,
+                    resolved=incident.mttr_seconds is not None,
+                    mttr_seconds=incident.mttr_seconds,
+                )
+            )
+
+        total = len(records)
+        correct = sum(item.applied_currently_valid_fix for item in records)
+        stale = sum(item.applied_stale_fact for item in records)
+        accuracy = round(correct / total, 6) if total else 0.0
+        return {
+            "status": "measured",
+            "produced_by": PRODUCED_BY,
+            "expected_determined_by": "simulator_oracle_required_action (independent of responder)",
+            "families": sorted(families.keys()),
+            "incidents_evaluated": total,
+            "temporal_validity_accuracy": accuracy,
+            "stale_fact_applications": stale,
+            "target_temporal_validity_accuracy": TEMPORAL_VALIDITY_TARGET,
+            "target_stale_fact_applications": STALE_FACT_TARGET,
+            "meets_target": (
+                accuracy >= TEMPORAL_VALIDITY_TARGET and stale == STALE_FACT_TARGET
+            ),
+            "incidents": [asdict(item) for item in records],
+        }
+
+    # ---- PENDING the real agent: decision quality ----------------------
+
+    def _decision_quality(
+        self,
+        memory_results: list[IncidentResult],
+        baseline_results: list[IncidentResult],
+    ) -> dict[str, Any]:
+        """Agent decision-quality metrics are NOT measured here.
+
+        MTTR delta, first-action accuracy, and wrong-action rate require the
+        real Bedrock agent reasoning over retrieved memory versus a competent
+        memoryless baseline (Reality Charter R7). The deterministic arms below
+        exist only as a mechanism/regression check: they confirm the
+        simulator + replay plumbing is deterministic and that a competent
+        baseline (not a handicapped one) reaches resolution on the same stream.
+        No improvement figure is emitted from them.
+        """
+
+        return {
+            "status": "pending_real_agent_run",
+            "measured": False,
+            "reason": (
+                "MTTR delta, first-action accuracy and wrong-action rate are "
+                "agent decision-quality metrics. Per Reality Charter R7 they "
+                "require the real Bedrock agent run over retrieved memory vs a "
+                "competent memoryless baseline. A deterministic responder cannot "
+                "measure them."
+            ),
+            "mttr_reduction_percent": None,
+            "first_action_accuracy_delta": None,
+            "wrong_action_rate_delta": None,
+            "failed_orders_avoided": None,
+            "mechanism_check": {
+                "note": (
+                    "Deterministic regression harness ONLY -- verifies the "
+                    "simulator/replay is deterministic and that both arms drive "
+                    "every incident to resolution. NOT a performance comparison. "
+                    "The baseline is a competent memoryless responder (Reality "
+                    "Charter R2), not a handicapped one; on this deterministic "
+                    "toy world it resolves the same incidents the memory arm "
+                    "does, which is exactly why a real-agent run is required to "
+                    "claim any decision-quality benefit."
+                ),
+                "baseline_kind": "competent_memoryless",
+                "scenario_stream_identical": True,
+                "deterministic_ids_match": [
+                    item.incident_id for item in memory_results
+                ]
+                == [item.incident_id for item in baseline_results],
+                "both_arms_resolved_all_incidents": all(
+                    item.mttr_seconds is not None for item in memory_results
+                )
+                and all(
+                    item.mttr_seconds is not None for item in baseline_results
+                ),
+                "baseline_played_no_deliberately_wrong_first_action": all(
+                    item.first_action_correct or item.abstained
+                    for item in baseline_results
+                ),
+                "arms": {
+                    "with_memory": self._summarize(memory_results),
+                    "competent_baseline": self._summarize(baseline_results),
+                },
+            },
+        }
+
+    def _summarize(self, results: list[IncidentResult]) -> dict[str, Any]:
+        mttr = [item.mttr_seconds for item in results]
+        tokens = sum(item.token_proxy for item in results)
+        return {
+            "incidents": len(results),
+            "resolved": len(results),
+            "median_mttr_seconds": statistics.median(mttr),
+            "p90_mttr_seconds": self._percentile(mttr, 0.9),
+            "mean_actions_to_resolution": round(
+                statistics.mean(item.actions for item in results), 3
+            ),
+            "first_action_accuracy": round(
+                statistics.mean(item.first_action_correct for item in results),
+                6,
+            ),
+            "wrong_actions": sum(item.wrong_actions for item in results),
+            "escalations": sum(item.escalated for item in results),
+            "failed_orders": sum(item.failed_orders for item in results),
+            "failed_order_value_cents": sum(
+                item.failed_order_value_cents for item in results
+            ),
+            "token_proxy_total": tokens,
+            "token_proxy_mean": round(tokens / len(results), 3),
+            "incidents_detail": [self._incident_dict(item) for item in results],
+        }
 
     @staticmethod
     def _percentile(values: list[int], quantile: float) -> int:
@@ -509,16 +559,37 @@ class EvaluationHarness:
         return ordered[index]
 
     @staticmethod
-    def _reduction(baseline: float, improved: float) -> float:
-        if baseline == 0:
-            return 0.0
-        return round((baseline - improved) / baseline * 100, 3)
-
-    @staticmethod
     def _incident_dict(result: IncidentResult) -> dict[str, Any]:
         payload = asdict(result)
         payload["retrieved_memory_ids"] = list(result.retrieved_memory_ids)
         return payload
+
+
+def _hashable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    if isinstance(value, list):
+        return tuple(_hashable(v) for v in value)
+    return value
+
+
+def _action_signature(action_type: str, params: dict[str, Any]) -> tuple:
+    """Structural signature of an action, ignoring target-service templating
+    (every fixture/oracle action targets ``$incident.service``)."""
+
+    return (action_type, tuple(sorted((k, _hashable(v)) for k, v in params.items())))
+
+
+def _oracle_required_signature(
+    oracle: dict[str, Any], scenario_id: str, family_id: str
+) -> list[tuple[str, tuple]]:
+    policy = oracle.get("scenarios", {}).get(scenario_id) or oracle["families"][
+        family_id
+    ]
+    return [
+        _action_signature(action["action_type"], action.get("params", {}))
+        for action in policy["required_actions"]
+    ]
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -552,16 +623,15 @@ class TemporalProceduralMemoryResponder(ProceduralMemoryResponder):
     """Bitemporal-aware procedural-memory responder.
 
     Composes with (subclasses, never edits) ``ProceduralMemoryResponder``:
-    identical text-similarity ranking, identical near-miss/abstention
-    behavior, identical decision-time ramp -- the only difference is that a
-    candidate whose ``valid_from``/``valid_to`` window does not cover the
-    incident's ``observed_at`` is excluded from ranking entirely, the same
-    way ``valid_to IS NULL OR valid_to > as_of`` excludes a superseded
-    ``semantic_facts`` row in production recall (backend/src/postmortem_backend
-    /recall.py::RecallRanker._temporally_valid). Corpus records with no
-    ``valid_from``/``valid_to`` (the entire Phase 2 corpus) are always
-    eligible, so this class is a byte-for-byte no-op substitute for the base
-    responder wherever no drift facts are involved.
+    identical text-similarity ranking, identical similarity-threshold
+    abstention -- the only difference is that a candidate whose
+    ``valid_from``/``valid_to`` window does not cover the incident's
+    ``observed_at`` is excluded from ranking entirely, the same way
+    ``valid_to IS NULL OR valid_to > as_of`` excludes a superseded row in
+    production recall. Corpus records with no ``valid_from``/``valid_to`` (the
+    entire Phase 2 corpus) are always eligible, so this class is a byte-for-byte
+    no-op substitute for the base responder wherever no drift facts are
+    involved.
     """
 
     def __init__(
@@ -602,16 +672,11 @@ class TemporalProceduralMemoryResponder(ProceduralMemoryResponder):
         retrieval_tokens = sum(len(tokenize(record.text)) for _, _, record in top)
         base_tokens = 220 + len(query) * 3 + retrieval_tokens
 
-        inapplicable_memory_ids: set[str] = set()
-        if "pool health confirmed" in observation.signal.lower():
-            inapplicable_memory_ids.add("mem-f2-pool")
         candidate = next(
             (
                 item
                 for item in top
-                if item[1] not in inapplicable_memory_ids
-                and item[0] >= self.match_threshold
-                and item[2].actions
+                if item[0] >= self.match_threshold and item[2].actions
             ),
             None,
         )
@@ -628,12 +693,9 @@ class TemporalProceduralMemoryResponder(ProceduralMemoryResponder):
                 retrieved=hits,
                 token_proxy=base_tokens + 80,
                 abstained=True,
-                decision_seconds=120,
+                decision_seconds=DECISION_LATENCY_NOT_MEASURED,
             )
 
-        prior_uses = self._memory_use_count.get(candidate[1], 0)
-        self._memory_use_count[candidate[1]] = prior_uses + 1
-        decision_seconds = (180, 60, 0)[min(prior_uses, 2)]
         rendered = tuple(
             self._render_action(action, observation) for action in candidate[2].actions
         )
@@ -642,5 +704,5 @@ class TemporalProceduralMemoryResponder(ProceduralMemoryResponder):
             retrieved=hits,
             token_proxy=base_tokens + 70 * len(rendered),
             authorized_memory_id=candidate[1],
-            decision_seconds=decision_seconds,
+            decision_seconds=DECISION_LATENCY_NOT_MEASURED,
         )

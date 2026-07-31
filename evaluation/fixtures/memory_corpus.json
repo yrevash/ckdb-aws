@@ -158,6 +158,69 @@
       ]
     },
     {
+      "memory_id": "hardneg-f1-transient-5xx",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "HTTP 5xx briefly rose right after a canary deploy but the rollout was healthy; a transient upstream 5xx storm cleared on its own without a rollback.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f2-missing-index",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "High p99 latency and slow database responses resembled connection pool exhaustion but were caused by a missing index on a hot table; the pool itself stayed healthy and db_pool_size was already adequate.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f3-client-timeout",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "Cache timeout errors rose from a client-side timeout misconfiguration rather than a cascade; the redis cluster v2 nodes were healthy so repointing the cache would not have helped.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f4-batch-job",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "A traffic spike and rising CPU with climbing latency looked like saturation but came from a runaway batch job; latency recovered once the job was killed, so scaling capacity was unnecessary.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f5-normal-rate",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "A retry storm signature appeared in the logs but the actual request rate stayed normal; an upstream blip resolved itself and throttling traffic was not required.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f6-cache-preload",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "Memory pressure and OOM-like process crashes on the worker traced to an oversized cache preload rather than a gradual leak; a config memory cap fixed it and a restart alone would recur.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f7-unrelated-flag",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "A validation error spike followed a deploy that also flipped several config flags at once; the express checkout flag change was unrelated and reverting it would not clear the errors.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f8-primary-slow",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "The orders datastore primary showed high write latency and slow commits under load but stayed available and kept accepting writes; failing over to the replica was not warranted.",
+      "actions": []
+    },
+    {
+      "memory_id": "hardneg-f9-clock-skew",
+      "family_id": "HARD_NEGATIVE",
+      "gold": false,
+      "text": "The upstream payment provider returned intermittent authorization failures caused by a client clock skew, not a provider outage; the primary provider was healthy so failing over would not help.",
+      "actions": []
+    },
+    {
       "memory_id": "noise-certificate",
       "family_id": "DISTRACTOR",
       "text": "Expired TLS certificate caused ingress handshake failures. Rotate the certificate and reload the edge proxy.",

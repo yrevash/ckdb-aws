@@ -111,7 +111,9 @@ export function ResiliencePanel({
         {/* The money shot: RPO pinned to 0 through every phase. */}
         <div className={`res-rpo res-rpo--${phase.id}`} aria-live="off">
           <span className="eyebrow">Recovery point objective</span>
-          <strong className="res-rpo__value">{phase.rpoRowsLost}</strong>
+          <strong className="res-rpo__value">
+            {phase.rpoRowsLost ?? "—"}
+          </strong>
           <span className="res-rpo__unit">rows lost</span>
           <span className="res-rpo__hold">
             held through the kill · {view.rpo.rowsFound}/{view.rpo.rowsExpected} tracked rows re-read intact
@@ -200,11 +202,14 @@ export function ResiliencePanel({
         <article className="res-wedge">
           <div className="res-wedge__head">
             <span className="eyebrow">Read-your-own-writes</span>
-            <ProbeStatusDot ok={view.freshness.status === "pass"} label="0 ms staleness" />
+            <ProbeStatusDot
+              ok={view.freshness.status === "pass"}
+              label={view.freshness.foundImmediately ? "found immediately" : "replication lag"}
+            />
           </div>
           <p className="res-chip res-chip--gold">
-            <span aria-hidden="true">✦</span> found immediately
-            <strong>{view.freshness.staleMs ?? "—"} ms</strong>
+            <span aria-hidden="true">✦</span> read latency
+            <strong>{view.freshness.staleMs !== null ? `${view.freshness.staleMs} ms` : "—"}</strong>
           </p>
           <p className="res-wedge__note">
             wrote on <code>{view.freshness.writeNode}</code>, read back on{" "}
@@ -257,7 +262,9 @@ export function ResiliencePanel({
           <p className="res-chip res-chip--cyan">
             <span aria-hidden="true">✓</span>
             {view.crossAgent.crossRegion ? "cross-region" : "same-region"} read
-            <strong>{view.crossAgent.latencyMs ?? "—"} ms</strong>
+            <strong>
+              {view.crossAgent.latencyMs !== null ? `${view.crossAgent.latencyMs} ms` : "—"}
+            </strong>
           </p>
           <p className="res-wedge__note">
             One agent writes through one gateway; another reads through a

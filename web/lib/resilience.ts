@@ -84,7 +84,11 @@ export type ResilienceView = {
     recoveryElapsedSeconds: number;
   };
   rpo: {
-    rowsLost: number;
+    /**
+     * Rows lost. `null` when the report is malformed enough that loss can't be
+     * determined — never silently 0, which would hide real data loss (R6).
+     */
+    rowsLost: number | null;
     rowsExpected: number;
     rowsFound: number;
     status: ProbeStatus;
@@ -134,8 +138,8 @@ export type FailoverPhase = {
   regionDown: boolean;
   /** RTO reading to show at this phase; `null` while it is still resolving. */
   rtoSeconds: number | null;
-  /** RPO rows lost — pinned to the same value across every phase. */
-  rpoRowsLost: number;
+  /** RPO rows lost — pinned to the same value across every phase; `null` when unknown. */
+  rpoRowsLost: number | null;
 };
 
 function bool(value: unknown): boolean {
@@ -144,6 +148,11 @@ function bool(value: unknown): boolean {
 
 function num(value: unknown): number | null {
   return typeof value === "number" ? value : null;
+}
+
+/** Length of an array-valued detail (e.g. a list of lost rows), or null when it isn't a list. */
+function arrayLength(value: unknown): number | null {
+  return Array.isArray(value) ? value.length : null;
 }
 
 function str(value: unknown, fallback = ""): string {
@@ -192,6 +201,19 @@ export function resilienceViewFromReport(value: unknown): ResilienceView | null 
   }
 
   const rpoDetails = probes.rpo.details;
+  // Rows lost = missing rows + content-mismatched rows. Both are LISTS in the
+  // real report, so the previous `num([...])` always yielded null and fell
+  // through to a reassuring 0. Derive from the list lengths; when neither the
+  // measured value nor the lists are present, report `null` (unknown) rather
+  // than a false 0 that would mask data loss.
+  const rpoMissing = arrayLength(rpoDetails.rows_missing);
+  const rpoMismatched = arrayLength(rpoDetails.rows_content_mismatched);
+  const rpoDerivedLost =
+    rpoMissing !== null || rpoMismatched !== null
+      ? (rpoMissing ?? 0) + (rpoMismatched ?? 0)
+      : null;
+  const rpoRowsLost =
+    typeof probes.rpo.measured_value === "number" ? probes.rpo.measured_value : rpoDerivedLost;
   const rtoDetails = probes.rto.details;
   const freshDetails = probes.freshness.details;
   const crossDetails = probes.cross_agent_visibility.details;
@@ -215,7 +237,7 @@ export function resilienceViewFromReport(value: unknown): ResilienceView | null 
       recoveryElapsedSeconds: num(liveness.recovery_elapsed_seconds) ?? 0,
     },
     rpo: {
-      rowsLost: probes.rpo.measured_value ?? num(rpoDetails.rows_content_mismatched) ?? 0,
+      rowsLost: rpoRowsLost,
       rowsExpected: num(rpoDetails.rows_expected) ?? 0,
       rowsFound: num(rpoDetails.rows_found) ?? 0,
       status: probes.rpo.status,

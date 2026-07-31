@@ -73,6 +73,7 @@ def probe_cross_agent_visibility(*, writer_node: Node, reader_node: Node,
         unit="ms",
         details={
             "event_id": event_id,
+            "content": marker,
             "writer_node": writer_node.service,
             "writer_region": writer_node.region,
             "reader_node": reader_node.service,

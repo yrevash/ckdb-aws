@@ -121,7 +121,9 @@ def probe_atomicity(*, node: Node, seed: SeedContext) -> ProbeResult:
         details={
             "commit_path": {
                 "event_id": commit_event_id,
+                "event_content": "atomicity probe: commit path",
                 "action_id": commit_action_id,
+                "action_idempotency_key": commit_idempotency_key,
                 "episodic_present": commit_episodic_present,
                 "action_present": commit_action_present,
                 "pass": commit_ok,

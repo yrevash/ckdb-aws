@@ -25,12 +25,15 @@ export function useConsoleEvents(): ConsoleStream {
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const timers = useRef<number[]>([]);
   const source = useRef<EventSource | null>(null);
+  const evaluationAbort = useRef<AbortController | null>(null);
 
   const clearTransport = useCallback(() => {
     timers.current.forEach(window.clearTimeout);
     timers.current = [];
     source.current?.close();
     source.current = null;
+    evaluationAbort.current?.abort();
+    evaluationAbort.current = null;
   }, []);
 
   const replay = useCallback(() => {
@@ -63,12 +66,17 @@ export function useConsoleEvents(): ConsoleStream {
 
     eventSource.onopen = () => {
       setStatus("live");
-      void fetch(evaluationEndpoint)
+      const controller = new AbortController();
+      evaluationAbort.current = controller;
+      void fetch(evaluationEndpoint, { signal: controller.signal })
         .then((response) => {
           if (!response.ok) throw new Error(`evaluation HTTP ${response.status}`);
           return response.json() as Promise<unknown>;
         })
         .then((report) => {
+          // Bail if the effect was torn down (unmount / reconnect) mid-flight so
+          // we never call setState on an unmounted component.
+          if (controller.signal.aborted) return;
           const evaluation = evaluationEventFromReport(report);
           if (evaluation) {
             setEvents((current) =>
@@ -79,7 +87,8 @@ export function useConsoleEvents(): ConsoleStream {
           }
         })
         .catch(() => {
-          // The live incident stream remains useful when the optional scorecard is absent.
+          // The live incident stream remains useful when the optional scorecard
+          // is absent or the fetch was aborted on teardown.
         });
     };
     const receive = (message: MessageEvent<string>) => {

@@ -7,43 +7,56 @@ import type {
   ActEvent,
   ConsoleEvent,
   EvaluationEvent,
+  FailoverEvent,
   IncidentEvent,
   RecallEvent,
   ReasonEvent,
   RecordEvent,
+  Region,
   TransactionEvent,
 } from "@/lib/events";
 
-const historicalCases = [
-  {
-    id: "CASE-2041",
-    service: "checkout-api",
-    meta: "SEV-1 · now",
-    status: "active",
-    region: "us-east",
-  },
-  {
-    id: "CASE-2038",
-    service: "billing-worker",
-    meta: "resolved · 23m",
-    status: "resolved",
-    region: "eu-west",
-  },
-  {
-    id: "CASE-1878",
-    service: "checkout-api",
-    meta: "resolved · 14 Mar",
-    status: "recalled",
-    region: "us-west",
-  },
-  {
-    id: "CASE-2035",
-    service: "search-api",
-    meta: "resolved · 41m",
-    status: "resolved",
-    region: "us-east",
-  },
-] as const;
+type FeedCase = {
+  id: string;
+  service: string;
+  severity?: string;
+  region?: string;
+  status: "active" | "recalled";
+};
+
+/**
+ * Build the incident feed from real stream data only: the active case comes
+ * from the incident event, prior cases come from what recall actually returned
+ * (result.sourceCaseId). Nothing is invented — an empty stream yields an empty
+ * feed (Reality Charter R6).
+ */
+function feedCasesFrom(incident?: IncidentEvent, recall?: RecallEvent): FeedCase[] {
+  const cases: FeedCase[] = [];
+  const seen = new Set<string>();
+
+  if (incident) {
+    cases.push({
+      id: incident.caseId,
+      service: incident.payload.service,
+      severity: incident.payload.severity,
+      region: incident.agent.region,
+      status: "active",
+    });
+    seen.add(incident.caseId);
+  }
+
+  for (const result of recall?.payload.results ?? []) {
+    if (!result.sourceCaseId || seen.has(result.sourceCaseId)) continue;
+    seen.add(result.sourceCaseId);
+    cases.push({
+      id: result.sourceCaseId,
+      service: result.scope?.service ?? "—",
+      status: "recalled",
+    });
+  }
+
+  return cases;
+}
 
 function eventOfType<TType extends ConsoleEvent["type"]>(
   events: ConsoleEvent[],
@@ -62,6 +75,36 @@ function formatTime(isoDate: string) {
     hour12: false,
     timeZone: "UTC",
   }).format(new Date(isoDate));
+}
+
+/** p99 latency: milliseconds under a second, otherwise seconds with one decimal. */
+function formatLatency(ms?: number) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "—";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function formatPercent(pct?: number) {
+  if (typeof pct !== "number" || !Number.isFinite(pct)) return "—";
+  return `${pct}%`;
+}
+
+function formatBurn(rate?: number) {
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return "—";
+  return `${rate}×`;
+}
+
+/** Format an mm:ss elapsed span from a non-negative number of seconds. */
+function formatElapsed(totalSeconds: number | null) {
+  if (totalSeconds === null || !Number.isFinite(totalSeconds) || totalSeconds < 0) return "—";
+  const rounded = Math.floor(totalSeconds);
+  const minutes = Math.floor(rounded / 60);
+  const seconds = rounded % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+/** Render a tool-call argument value: strings quoted, numbers/booleans bare. */
+function formatArgument(value: string | number | boolean) {
+  return typeof value === "string" ? `"${value}"` : String(value);
 }
 
 function Glyph({
@@ -100,9 +143,18 @@ function StreamIndicator({
 
 function SystemStateBar({
   streamStatus,
+  incident,
+  failover,
+  regions,
 }: {
   streamStatus: "connecting" | "live" | "replay" | "paused";
+  incident?: IncidentEvent;
+  failover?: FailoverEvent;
+  regions: Region[];
 }) {
+  const clusterState = failover?.payload.clusterState;
+  const rtoMs = failover?.payload.rtoMs ?? null;
+
   return (
     <header className="system-bar">
       <div className="brand-block">
@@ -117,34 +169,45 @@ function SystemStateBar({
 
       <div className="active-case">
         <span className="case-kicker">Active case</span>
-        <strong>CASE-2041</strong>
-        <span className="case-service">checkout-api</span>
+        <strong>{incident?.caseId ?? "—"}</strong>
+        <span className="case-service">{incident?.payload.service ?? "—"}</span>
         <span className="severity-badge">
-          <span aria-hidden="true">◆</span> SEV-1
+          <span aria-hidden="true">◆</span> {incident?.payload.severity ?? "—"}
         </span>
       </div>
 
       <div className="system-state" aria-label="CockroachDB system state">
-        <div className="regions" aria-label="Three healthy database regions">
-          {(["us-east", "us-west", "eu-west"] as const).map((region) => (
-            <span className="region" key={region}>
-              <span className="region__dot" aria-hidden="true" />
-              {region}
+        <div className="regions" aria-label="Regions observed in the incident stream">
+          {regions.length ? (
+            regions.map((region) => {
+              const down =
+                failover?.payload.affectedRegion === region &&
+                failover.payload.regionState !== "healthy";
+              return (
+                <span className={`region ${down ? "region--down" : ""}`} key={region}>
+                  <span className="region__dot" aria-hidden="true" />
+                  {region}
+                </span>
+              );
+            })
+          ) : (
+            <span className="region">
+              <span className="region__dot" aria-hidden="true" />—
             </span>
-          ))}
+          )}
         </div>
         <div className="thesis-metrics">
           <span className="metric">
             <span className="metric__label">RPO</span>
-            <strong>0</strong>
+            <strong>{failover ? failover.payload.rpoRows : "—"}</strong>
             <span className="metric__unit">rows</span>
           </span>
           <span className="metric">
             <span className="metric__label">RTO</span>
-            <strong>—</strong>
+            <strong>{rtoMs !== null ? `${rtoMs}ms` : "—"}</strong>
           </span>
           <span className="cluster-health">
-            <span aria-hidden="true">●</span> healthy
+            <span aria-hidden="true">●</span> {clusterState ?? "—"}
           </span>
         </div>
       </div>
@@ -154,14 +217,23 @@ function SystemStateBar({
   );
 }
 
-function IncidentFeed() {
-  const [filter, setFilter] = useState<"all" | "sev1" | "checkout">("all");
+function IncidentFeed({
+  incident,
+  recall,
+}: {
+  incident?: IncidentEvent;
+  recall?: RecallEvent;
+}) {
+  const [filter, setFilter] = useState<"all" | "sev1" | "active">("all");
+  const cases = feedCasesFrom(incident, recall);
 
-  const visibleCases = historicalCases.filter((item) => {
-    if (filter === "sev1") return item.meta.includes("SEV-1");
-    if (filter === "checkout") return item.service === "checkout-api";
+  const visibleCases = cases.filter((item) => {
+    if (filter === "sev1") return item.severity === "SEV-1";
+    if (filter === "active") return item.status === "active";
     return true;
   });
+
+  const recalledCase = cases.find((item) => item.status === "recalled");
 
   return (
     <aside className="rail incident-rail" aria-labelledby="incident-feed-heading">
@@ -174,31 +246,37 @@ function IncidentFeed() {
       </div>
 
       <div className="case-list">
-        {visibleCases.map((incident) => (
-          <button
-            className={`case-row case-row--${incident.status}`}
-            type="button"
-            key={incident.id}
-            aria-current={incident.status === "active" ? "true" : undefined}
-          >
-            <span className="case-row__rail" aria-hidden="true" />
-            <span className="case-row__topline">
-              <strong>{incident.id}</strong>
-              <span className="case-row__state">
-                {incident.status === "active"
-                  ? "active"
-                  : incident.status === "recalled"
-                    ? "memory source"
-                    : "closed"}
+        {visibleCases.length ? (
+          visibleCases.map((item) => (
+            <button
+              className={`case-row case-row--${item.status}`}
+              type="button"
+              key={item.id}
+              aria-current={item.status === "active" ? "true" : undefined}
+            >
+              <span className="case-row__rail" aria-hidden="true" />
+              <span className="case-row__topline">
+                <strong>{item.id}</strong>
+                <span className="case-row__state">
+                  {item.status === "active" ? "active" : "memory source"}
+                </span>
               </span>
+              <span className="case-row__service">{item.service}</span>
+              <span className="case-row__meta">
+                <span>{item.severity ?? "—"}</span>
+                <span>{item.region ?? "—"}</span>
+              </span>
+            </button>
+          ))
+        ) : (
+          <div className="memory-empty">
+            <span className="memory-empty__glyph" aria-hidden="true">
+              ◇
             </span>
-            <span className="case-row__service">{incident.service}</span>
-            <span className="case-row__meta">
-              <span>{incident.meta}</span>
-              <span>{incident.region}</span>
-            </span>
-          </button>
-        ))}
+            <strong>No cases yet</strong>
+            <p>The active case and any recalled prior cases will appear here.</p>
+          </div>
+        )}
       </div>
 
       <fieldset className="filters">
@@ -208,7 +286,7 @@ function IncidentFeed() {
             [
               ["all", "All"],
               ["sev1", "SEV-1"],
-              ["checkout", "Checkout"],
+              ["active", "Active"],
             ] as const
           ).map(([value, label]) => (
             <button
@@ -224,13 +302,15 @@ function IncidentFeed() {
         </div>
       </fieldset>
 
-      <div className="rail-footnote">
-        <Glyph tone="recall">◇</Glyph>
-        <span>
-          <strong>CASE-1878</strong> is visible before recall—the prior case is evidence,
-          not hidden context.
-        </span>
-      </div>
+      {recalledCase ? (
+        <div className="rail-footnote">
+          <Glyph tone="recall">◇</Glyph>
+          <span>
+            <strong>{recalledCase.id}</strong> surfaced by recall—the prior case is
+            evidence, not hidden context.
+          </span>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -250,24 +330,28 @@ function Investigation({
   action,
   transaction,
   hasRecall,
+  elapsedSeconds,
 }: {
   incident?: IncidentEvent;
   reason?: ReasonEvent;
   action?: ActEvent;
   transaction?: TransactionEvent;
   hasRecall: boolean;
+  elapsedSeconds: number | null;
 }) {
   const [approved, setApproved] = useState(false);
+  const telemetry = incident?.payload.telemetry;
+  const argEntries = action ? Object.entries(action.payload.arguments) : [];
 
   return (
     <main className="investigation" id="investigation" aria-labelledby="investigation-heading">
       <div className="investigation__header">
         <div>
-          <span className="eyebrow">CASE-2041 · live investigation</span>
-          <h1 id="investigation-heading">Checkout latency after canary</h1>
+          <span className="eyebrow">{incident?.caseId ?? "—"} · live investigation</span>
+          <h1 id="investigation-heading">{incident?.payload.service ?? "Awaiting incident"}</h1>
         </div>
         <span className="elapsed">
-          <span aria-hidden="true">◷</span> 04:18 elapsed
+          <span aria-hidden="true">◷</span> {formatElapsed(elapsedSeconds)} elapsed
         </span>
       </div>
 
@@ -285,16 +369,16 @@ function Investigation({
               <h3>{incident.payload.summary}</h3>
               <div className="telemetry-strip">
                 <span>
-                  p99 <strong>4.2s</strong>
+                  p99 <strong>{formatLatency(telemetry?.p99LatencyMs)}</strong>
                 </span>
                 <span>
-                  errors <strong>18.4%</strong>
+                  errors <strong>{formatPercent(telemetry?.errorRatePct)}</strong>
                 </span>
                 <span>
-                  deploy <strong>#5120</strong>
+                  deploy <strong>{telemetry?.deploy ?? "—"}</strong>
                 </span>
                 <span>
-                  burn <strong>16.2×</strong>
+                  burn <strong>{formatBurn(telemetry?.errorBudgetBurnRate)}</strong>
                 </span>
               </div>
             </div>
@@ -375,7 +459,16 @@ function Investigation({
               <code>
                 {action.payload.tool}
                 <span>(</span>
-                service=&quot;checkout-api&quot;, to=&quot;#5119&quot;
+                {argEntries.length ? (
+                  argEntries.map(([key, value], index) => (
+                    <span key={key}>
+                      {index > 0 ? ", " : ""}
+                      {key}={formatArgument(value)}
+                    </span>
+                  ))
+                ) : (
+                  <span>—</span>
+                )}
                 <span>)</span>
               </code>
             </div>
@@ -587,6 +680,16 @@ function RecordedMemoryCard({ record }: { record: RecordEvent }) {
   );
 }
 
+function formatLearnedDate(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  }).format(date);
+}
+
 function MemoryTimeline({
   recall,
   record,
@@ -596,6 +699,11 @@ function MemoryTimeline({
   record?: RecordEvent;
   evaluation?: EvaluationEvent;
 }) {
+  // The known-fact note is a real recalled semantic memory, not a static string.
+  const semanticFact = recall?.payload.results.find(
+    (result) => result.memoryKind === "semantic",
+  );
+
   return (
     <aside className="rail memory-rail" aria-labelledby="memory-heading">
       <div className="rail-heading">
@@ -622,16 +730,18 @@ function MemoryTimeline({
             <p>The strongest prior case will attach here as evidence.</p>
           </div>
         ) : null}
-        <div className="timeline-note">
-          <span className="timeline-note__marker" aria-hidden="true">
-            ◇
-          </span>
-          <div>
-            <strong>Semantic fact</strong>
-            <p>checkout-api deploy policy: rollback requires approval</p>
-            <small>current · learned 12 Jun</small>
+        {semanticFact ? (
+          <div className="timeline-note">
+            <span className="timeline-note__marker" aria-hidden="true">
+              ◇
+            </span>
+            <div>
+              <strong>Semantic fact</strong>
+              <p>{semanticFact.summary}</p>
+              <small>current · learned {formatLearnedDate(semanticFact.learnedAt)}</small>
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       <div className="memory-legend" aria-label="Memory timeline legend">
@@ -650,60 +760,38 @@ function MemoryTimeline({
 }
 
 function MemoryLiftCard({ evaluation }: { evaluation: EvaluationEvent }) {
-  const { cold, memory } = evaluation.payload;
-  const improvement = Math.round(
-    ((cold.medianMttrSeconds - memory.medianMttrSeconds) /
-      cold.medianMttrSeconds) *
-      100,
-  );
-  const maximum = Math.max(
-    ...evaluation.payload.learningCurve.flatMap((point) => [
-      point.coldMttrSeconds,
-      point.memoryMttrSeconds,
-    ]),
-  );
+  const { retrieval, decisionQualityMeasured } = evaluation.payload;
 
   return (
-    <article className="memory-lift-card" aria-label="Memory versus cold evaluation">
+    <article className="memory-lift-card" aria-label="Retrieval evaluation">
       <div className="memory-card__eyebrow">
-        <span className="written-label">Phase 2 proof</span>
-        <span>{evaluation.payload.familyCount} families</span>
-      </div>
-      <div className="lift-number">
-        <strong>{improvement}%</strong>
-        <span>lower median MTTR with memory</span>
+        <span className="written-label">Phase 2 · retrieval</span>
+        <span>{retrieval.hardNegativeCount} hard negatives</span>
       </div>
       <div className="arm-comparison">
         <span>
-          cold <strong>{cold.medianMttrSeconds}s</strong>
+          recall@1 <strong>{retrieval.recallAt1.toFixed(2)}</strong>
         </span>
         <span>
-          memory <strong>{memory.medianMttrSeconds}s</strong>
+          recall@10 <strong>{retrieval.recallAt10.toFixed(2)}</strong>
         </span>
         <span>
-          recall@10 <strong>{evaluation.payload.recallAt10.toFixed(2)}</strong>
+          nDCG@10 <strong>{retrieval.ndcgAt10.toFixed(2)}</strong>
         </span>
       </div>
-      <div className="learning-curve" aria-label="MTTR by recurrence">
-        {evaluation.payload.learningCurve.map((point) => (
-          <div className="curve-pair" key={point.occurrence}>
-            <span
-              className="curve-bar curve-bar--cold"
-              style={{ height: `${(point.coldMttrSeconds / maximum) * 100}%` }}
-              title={`Cold occurrence ${point.occurrence}: ${point.coldMttrSeconds}s`}
-            />
-            <span
-              className="curve-bar curve-bar--memory"
-              style={{ height: `${(point.memoryMttrSeconds / maximum) * 100}%` }}
-              title={`Memory occurrence ${point.occurrence}: ${point.memoryMttrSeconds}s`}
-            />
-            <small>#{point.occurrence}</small>
-          </div>
-        ))}
+      <div className="lift-number lift-number--pending">
+        {decisionQualityMeasured ? (
+          <strong>measured</strong>
+        ) : (
+          <span>
+            MTTR / decision-quality: <strong>pending</strong> — not yet measured,
+            requires the real reasoning agent
+          </span>
+        )}
       </div>
       <p className="provenance-line">
-        same seed · fewer wrong actions {cold.wrongActions} → {memory.wrongActions} · failed
-        orders {cold.failedOrders} → {memory.failedOrders}
+        real retrieval over a corpus with hard negatives · recall@1 &lt; 1.0 by design ·
+        no simulated decision-quality numbers are shown
       </p>
     </article>
   );
@@ -720,24 +808,58 @@ export function IncidentConsole() {
       transaction: eventOfType(events, "transaction"),
       record: eventOfType(events, "record"),
       evaluation: eventOfType(events, "evaluation"),
+      failover: eventOfType(events, "failover"),
     }),
     [events],
   );
+
+  // Regions actually observed in the stream (agent identities + cross-region
+  // recall). Real data — never a fixed three-region list.
+  const regions = useMemo(() => {
+    const seen = new Set<Region>();
+    for (const event of events) {
+      seen.add(event.agent.region);
+      if (event.type === "record" && event.payload.recalledBy) {
+        seen.add(event.payload.recalledBy.region);
+      }
+    }
+    return [...seen];
+  }, [events]);
+
+  // Investigation elapsed = span from the incident alert to the latest event in
+  // the stream. `null` (renders "—") until the incident arrives.
+  const elapsedSeconds = useMemo(() => {
+    const incident = view.incident;
+    if (!incident) return null;
+    const start = new Date(incident.occurredAt).getTime();
+    if (!Number.isFinite(start)) return null;
+    const latest = events.reduce((max, event) => {
+      const at = new Date(event.occurredAt).getTime();
+      return Number.isFinite(at) && at > max ? at : max;
+    }, start);
+    return Math.max(0, (latest - start) / 1000);
+  }, [events, view.incident]);
 
   return (
     <div className="console-shell">
       <a className="skip-link" href="#investigation">
         Skip to investigation
       </a>
-      <SystemStateBar streamStatus={status} />
+      <SystemStateBar
+        streamStatus={status}
+        incident={view.incident}
+        failover={view.failover}
+        regions={regions}
+      />
       <div className="console-grid">
-        <IncidentFeed />
+        <IncidentFeed incident={view.incident} recall={view.recall} />
         <Investigation
           incident={view.incident}
           reason={view.reason}
           action={view.action}
           transaction={view.transaction}
           hasRecall={Boolean(view.recall)}
+          elapsedSeconds={elapsedSeconds}
         />
         <MemoryTimeline
           recall={view.recall}
@@ -750,7 +872,7 @@ export function IncidentConsole() {
           <span className="footer-mark" aria-hidden="true">
             P
           </span>
-          CASE-2041 · Phase 2 memory-lift proof
+          {view.incident?.caseId ?? "—"} · Phase 2 memory-lift proof
         </span>
         <span className="footer-controls">
           <button type="button" onClick={pause} disabled={status === "paused"}>

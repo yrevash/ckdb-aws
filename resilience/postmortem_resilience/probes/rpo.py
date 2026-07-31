@@ -4,10 +4,17 @@ byte-for-byte, after recovery.
 
 This is a precise proof, not a raw `SELECT count(*)` before/after (which
 could mask one row lost and a concurrent unrelated one gained): the harness
-records the exact (table, id_column, row_id) of every write it makes for the
-whole run duration via `RpoTracker`, then this probe re-selects every single
-one of them after the region kill/restore cycle and fails if even one is
-missing or its content doesn't match what was written.
+records the exact (table, id_column, row_id, content_column, expected_
+content) of every write it makes for the whole run duration via
+`RpoTracker`, then this probe re-selects every single one of them and fails
+if even one is missing or its content doesn't match what was written.
+
+Charter R5: "verify data during the outage", not only after full recovery --
+the harness calls this probe twice with different `phase` labels: once while
+the killed region is still down (before `restore_region`), and once again
+after full node liveness is restored. Both runs check the SAME set of
+tracked rows on the SAME (surviving) node; the during-outage call is the one
+that actually proves RPO=0 under the failure, not just eventually.
 """
 
 from __future__ import annotations
@@ -48,7 +55,7 @@ class RpoTracker:
         return len(self.rows)
 
 
-def probe_rpo(*, node: Node, tracker: RpoTracker) -> ProbeResult:
+def probe_rpo(*, node: Node, tracker: RpoTracker, phase: str = "after_recovery") -> ProbeResult:
     conn = db.connect(node)
     missing: list[dict[str, str]] = []
     mismatched: list[dict[str, str]] = []
@@ -87,8 +94,10 @@ def probe_rpo(*, node: Node, tracker: RpoTracker) -> ProbeResult:
         measured_value=float(rows_lost),
         unit="rows_lost",
         details={
+            "phase": phase,
             "rows_expected": rows_expected,
             "rows_found": rows_expected - len(missing),
+            "rows_content_checked": sum(1 for t in tracker.rows if t.content_column),
             "rows_missing": missing,
             "rows_content_mismatched": mismatched,
         },

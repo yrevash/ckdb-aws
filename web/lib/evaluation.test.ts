@@ -2,52 +2,41 @@ import { describe, expect, it } from "vitest";
 
 import { evaluationEventFromReport } from "@/lib/evaluation";
 
-
-describe("Phase 2 evaluation report transport", () => {
-  it("maps the generated harness report into a console event", () => {
+describe("Phase 2 evaluation report transport (v2, honest)", () => {
+  it("maps the real retrieval metrics and the pending decision-quality flag", () => {
     const event = evaluationEventFromReport({
-      generated_at: "2026-07-30T00:00:00Z",
-      seed: 20260730,
-      recall: { recall_at_10: 1 },
-      arms: {
-        cold_start: {
-          summary: {
-            median_mttr_seconds: 660,
-            p90_mttr_seconds: 780,
-            wrong_actions: 20,
-            escalations: 3,
-            failed_orders: 197,
-            token_proxy_total: 27095,
-          },
-        },
-        with_memory: {
-          summary: {
-            median_mttr_seconds: 240,
-            p90_mttr_seconds: 420,
-            wrong_actions: 0,
-            escalations: 3,
-            failed_orders: 157,
-            token_proxy_total: 14031,
-          },
-        },
+      schema_version: "postmortem-eval-v2",
+      generated_at: "2026-07-31T00:00:00Z",
+      seed: 20260731,
+      retrieval: {
+        recall_at_1: 0.846154,
+        recall_at_5: 1.0,
+        recall_at_10: 1.0,
+        ndcg_at_10: 0.94322,
+        hard_negative_count: 9,
+        status: "measured",
       },
-      learning_curve: {
-        cold_start: [{ occurrence: 1, median_mttr_seconds: 660 }],
-        with_memory: [{ occurrence: 1, median_mttr_seconds: 300 }],
-      },
+      decision_quality: { measured: false, status: "pending_real_agent_run" },
+      temporal_validity: { status: "measured" },
     });
 
-    expect(event?.payload.recallAt10).toBe(1);
-    expect(event?.payload.cold.medianMttrSeconds).toBe(660);
-    expect(event?.payload.memory.wrongActions).toBe(0);
-    expect(event?.payload.learningCurve[0]).toEqual({
-      occurrence: 1,
-      coldMttrSeconds: 660,
-      memoryMttrSeconds: 300,
-    });
+    // Real retrieval surfaced (recall@1 < 1.0 by design).
+    expect(event?.payload.retrieval.recallAt1).toBeCloseTo(0.8462, 3);
+    expect(event?.payload.retrieval.recallAt10).toBe(1);
+    expect(event?.payload.retrieval.ndcgAt10).toBeCloseTo(0.9432, 3);
+    expect(event?.payload.retrieval.hardNegativeCount).toBe(9);
+    // Decision quality is NOT measured yet — never a fabricated number.
+    expect(event?.payload.decisionQualityMeasured).toBe(false);
   });
 
-  it("rejects incomplete reports", () => {
+  it("rejects a report missing the real retrieval section", () => {
     expect(evaluationEventFromReport({ seed: 1 })).toBeNull();
+    expect(
+      evaluationEventFromReport({
+        generated_at: "2026-07-31T00:00:00Z",
+        seed: 1,
+        decision_quality: { measured: false },
+      }),
+    ).toBeNull();
   });
 });
