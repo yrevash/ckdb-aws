@@ -33,7 +33,7 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="surface-error" role="alert">
+        <div className="error-surface" role="alert">
           <strong>{this.props.surface} unavailable</strong>
           <p>
             This view could not be rendered from the current data. No values are
