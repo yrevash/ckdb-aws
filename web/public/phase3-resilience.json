@@ -1,0 +1,230 @@
+{
+  "generated_at": "2026-07-31T14:32:55.970422+00:00",
+  "leaseholder_pin": {
+    "episodic_events": {
+      "elapsed_seconds": 99.3,
+      "leaseholder_store_ids": [
+        3,
+        5,
+        9
+      ],
+      "ranges_in_region": 9,
+      "ranges_total": 9,
+      "sample_leaseholder_locality": "region=us-east-2,zone=b",
+      "table": "episodic_events",
+      "target_region": "us-east-2",
+      "verified": true
+    },
+    "remediation_actions": {
+      "elapsed_seconds": 0.12,
+      "leaseholder_store_ids": [
+        3,
+        5,
+        9
+      ],
+      "ranges_in_region": 5,
+      "ranges_total": 5,
+      "sample_leaseholder_locality": "region=us-east-2,zone=c",
+      "table": "remediation_actions",
+      "target_region": "us-east-2",
+      "verified": true
+    }
+  },
+  "node_liveness": {
+    "after_recovery": 9,
+    "before_kill": 9,
+    "during_outage": 6,
+    "expected": 9,
+    "recovery_elapsed_seconds": 3.34,
+    "recovery_reached_full_liveness": true,
+    "region_down_detected": true,
+    "region_down_detection_seconds": 2.4
+  },
+  "overall": {
+    "failed_probes": [],
+    "pass": true,
+    "summary": "all resilience probes passed: RPO=0, RTO<target, freshness=0ms, atomicity holds, cross-agent visibility has no lag"
+  },
+  "probes": {
+    "atomicity": {
+      "details": {
+        "abort_path": {
+          "action_id": "96037599-1aaf-4857-8948-b085694ecd5c",
+          "action_present": false,
+          "constraint_violation_raised": true,
+          "episodic_present": false,
+          "event_id": "2090fccf-bacc-43e4-b96a-6e8bf8b8e08c",
+          "pass": true
+        },
+        "commit_path": {
+          "action_id": "34df1da4-74bf-4474-a797-8f36c2d2c09f",
+          "action_idempotency_key": "resilience-atomicity-commit-34df1da4-74bf-4474-a797-8f36c2d2c09f",
+          "action_present": true,
+          "episodic_present": true,
+          "event_content": "atomicity probe: commit path",
+          "event_id": "c108acb2-37b2-48a2-9aa3-db9fd5dbe9e3",
+          "pass": true
+        }
+      },
+      "measured_value": 1.0,
+      "probe_type": "atomicity",
+      "status": "pass",
+      "unit": "bool"
+    },
+    "cross_agent_visibility": {
+      "details": {
+        "content": "resilience-cross-agent-adf024d3-6297-4128-86c5-a7f503a1d64b",
+        "content_matches": true,
+        "cross_region": true,
+        "event_id": "adf024d3-6297-4128-86c5-a7f503a1d64b",
+        "found_immediately": true,
+        "reader_node": "crdb-use1-a",
+        "reader_region": "us-east-1",
+        "writer_node": "crdb-use2-a",
+        "writer_region": "us-east-2"
+      },
+      "measured_value": 7.442,
+      "probe_type": "cross_agent_visibility",
+      "status": "pass",
+      "unit": "ms"
+    },
+    "freshness": {
+      "details": {
+        "content": "resilience-freshness-f51b82ba-8dd2-4237-91b9-7f922e571b48",
+        "content_matches": true,
+        "event_id": "f51b82ba-8dd2-4237-91b9-7f922e571b48",
+        "found_immediately": true,
+        "read_node": "crdb-usw2-a",
+        "same_node": false,
+        "write_node": "crdb-use1-a"
+      },
+      "measured_value": 8.943,
+      "probe_type": "read_your_write",
+      "status": "pass",
+      "unit": "ms"
+    },
+    "rpo": {
+      "details": {
+        "phase": "after_recovery",
+        "rows_content_checked": 7,
+        "rows_content_mismatched": [],
+        "rows_expected": 7,
+        "rows_found": 7,
+        "rows_missing": []
+      },
+      "measured_value": 0.0,
+      "probe_type": "rpo",
+      "status": "pass",
+      "unit": "rows_lost"
+    },
+    "rpo_during_outage": {
+      "details": {
+        "phase": "during_outage",
+        "rows_content_checked": 7,
+        "rows_content_mismatched": [],
+        "rows_expected": 7,
+        "rows_found": 7,
+        "rows_missing": []
+      },
+      "measured_value": 0.0,
+      "probe_type": "rpo",
+      "status": "pass",
+      "unit": "rows_lost"
+    },
+    "rto": {
+      "details": {
+        "attempt_count": 2,
+        "attempts": [
+          {
+            "elapsed_ms": 2.2,
+            "error": "OperationalError",
+            "node": "crdb-use2-b",
+            "ok": false,
+            "region": "us-east-2"
+          },
+          {
+            "elapsed_ms": 3871.4,
+            "node": "crdb-use1-a",
+            "ok": true,
+            "region": "us-east-1"
+          }
+        ],
+        "failover_exercised": true,
+        "first_success_event_id": "bb39e381-5ed6-463f-a40f-af220021ef66",
+        "kill_region_failed_attempts": 1,
+        "leaseholder_node": "crdb-use2-b",
+        "leaseholder_region": "us-east-2",
+        "recovered_via_node": "crdb-use1-a",
+        "recovered_via_region": "us-east-1",
+        "target_seconds": 10.0
+      },
+      "measured_value": 3.874,
+      "probe_type": "rto",
+      "status": "pass",
+      "unit": "seconds"
+    }
+  },
+  "range_snapshot": {
+    "after_recovery": {
+      "leaseholder_region_counts": {
+        "us-east-1": 7,
+        "us-west-2": 2
+      },
+      "range_count": 9,
+      "replica_region_counts": {
+        "us-east-1": 18,
+        "us-east-2": 18,
+        "us-west-2": 9
+      },
+      "table": "episodic_events"
+    },
+    "before_kill": {
+      "leaseholder_region_counts": {
+        "us-east-2": 9
+      },
+      "range_count": 9,
+      "replica_region_counts": {
+        "us-east-1": 18,
+        "us-east-2": 18,
+        "us-west-2": 9
+      },
+      "table": "episodic_events"
+    },
+    "during_outage": {
+      "leaseholder_region_counts": {
+        "us-east-1": 7,
+        "us-west-2": 2
+      },
+      "range_count": 9,
+      "replica_region_counts": {
+        "us-east-1": 18,
+        "us-east-2": 18,
+        "us-west-2": 9
+      },
+      "table": "episodic_events"
+    }
+  },
+  "run": {
+    "agent_id": "59f77e10-5f7b-425a-a84a-ad268e1262e9",
+    "incident_id": "f85c7f0b-7552-459a-bc3b-8da68d5f7df9",
+    "org_id": "5eb2cba2-c446-4f0c-9613-c5410de87633",
+    "outage_writes": [
+      "177733ad-37ae-4f42-be0c-6ed40555981f",
+      "3b07e60b-2108-4b56-a55f-e237eabc2854"
+    ],
+    "rows_tracked_for_rpo": 7,
+    "service_id": "5d5ea920-fce3-45ba-8512-ef5c278267a9"
+  },
+  "schema_version": "postmortem-resilience-v1",
+  "topology": {
+    "killed_region": "us-east-2",
+    "nodes_total": 9,
+    "primary_region": "us-east-1",
+    "regions": [
+      "us-east-1",
+      "us-east-2",
+      "us-west-2"
+    ],
+    "replication_factor": 5
+  }
+}

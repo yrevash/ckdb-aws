@@ -10,10 +10,10 @@ describe("resilience report transport", () => {
   it("maps the postmortem-resilience-v1 report into a typed view", () => {
     const view = resilienceViewFromReport(PHASE_THREE_RESILIENCE_REPORT);
     expect(view).not.toBeNull();
-    expect(view?.killedRegion).toBe("us-east-1");
+    expect(view?.killedRegion).toBe("us-east-2");
     expect(view?.rpo.rowsLost).toBe(0);
     expect(view?.rpo.status).toBe("pass");
-    expect(view?.rto.seconds).toBe(0.099);
+    expect(view?.rto.seconds).toBe(3.874);
     expect(view?.freshness.foundImmediately).toBe(true);
     expect(view?.crossAgent.crossRegion).toBe(true);
     expect(view?.atomicity.commitPass).toBe(true);

@@ -318,19 +318,21 @@ export function failoverPhases(view: ResilienceView): FailoverPhase[] {
 }
 
 /**
- * Deterministic replay fixture. Mirrors the exact
- * `postmortem-resilience-v1` JSON the harness writes, using representative
- * measured values from the live runs recorded in docs/SESSION_2026-07-31.md §3
- * (RPO=0 every time; RTO 0.045–0.099s; liveness 9→6→9; freshness found
- * immediately; atomicity commit+abort both hold; cross-region visibility no lag).
+ * Deterministic replay fixture. Mirrors the exact `postmortem-resilience-v1`
+ * JSON the harness wrote to `evaluation/reports/phase3-resilience.json`, carrying
+ * the REAL measured values from that run: leaseholders pinned to (and killed in)
+ * us-east-2; RPO=0 (7/7 rows content-verified, during outage AND after recovery);
+ * RTO 3.874s failing over us-east-2 → us-east-1, under the 10s target; liveness
+ * 9→6→9; read-your-writes + cross-agent visibility found immediately; atomicity
+ * commit+abort both hold; leaseholders shift us-east-2:9 → us-east-1:7 / us-west-2:2.
  */
 export const PHASE_THREE_RESILIENCE_REPORT = {
   schema_version: "postmortem-resilience-v1",
-  generated_at: "2026-07-31T09:42:07.184000+00:00",
+  generated_at: "2026-07-31T14:32:55.970422+00:00",
   topology: {
     regions: ["us-east-1", "us-east-2", "us-west-2"],
     primary_region: "us-east-1",
-    killed_region: "us-east-1",
+    killed_region: "us-east-2",
     nodes_total: 9,
     replication_factor: 5,
   },
@@ -340,16 +342,38 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
     service_id: "checkout-api",
     incident_id: "CASE-2041",
     outage_writes: ["evt-outage-1", "evt-outage-2"],
-    rows_tracked_for_rpo: 8,
+    rows_tracked_for_rpo: 7,
+  },
+  leaseholder_pin: {
+    episodic_events: {
+      table: "episodic_events",
+      target_region: "us-east-2",
+      elapsed_seconds: 99.3,
+      leaseholder_store_ids: [3, 5, 9],
+      ranges_in_region: 9,
+      ranges_total: 9,
+      sample_leaseholder_locality: "region=us-east-2,zone=b",
+      verified: true,
+    },
+    remediation_actions: {
+      table: "remediation_actions",
+      target_region: "us-east-2",
+      elapsed_seconds: 0.12,
+      leaseholder_store_ids: [3, 5, 9],
+      ranges_in_region: 5,
+      ranges_total: 5,
+      sample_leaseholder_locality: "region=us-east-2,zone=c",
+      verified: true,
+    },
   },
   probes: {
     freshness: {
       probe_type: "read_your_write",
       status: "pass",
-      measured_value: 7.418,
+      measured_value: 8.943,
       unit: "ms",
       details: {
-        event_id: "evt-fresh-01",
+        event_id: "f51b82ba-8dd2-4237-91b9-7f922e571b48",
         write_node: "crdb-use1-a",
         read_node: "crdb-usw2-a",
         same_node: false,
@@ -360,14 +384,14 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
     cross_agent_visibility: {
       probe_type: "cross_agent_visibility",
       status: "pass",
-      measured_value: 13.204,
+      measured_value: 7.442,
       unit: "ms",
       details: {
-        event_id: "evt-cross-01",
-        writer_node: "crdb-use1-b",
-        writer_region: "us-east-1",
-        reader_node: "crdb-usw2-a",
-        reader_region: "us-west-2",
+        event_id: "adf024d3-6297-4128-86c5-a7f503a1d64b",
+        writer_node: "crdb-use2-a",
+        writer_region: "us-east-2",
+        reader_node: "crdb-use1-a",
+        reader_region: "us-east-1",
         cross_region: true,
         found_immediately: true,
         content_matches: true,
@@ -380,15 +404,15 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
       unit: "bool",
       details: {
         commit_path: {
-          event_id: "evt-commit-01",
-          action_id: "act-commit-01",
+          event_id: "c108acb2-37b2-48a2-9aa3-db9fd5dbe9e3",
+          action_id: "34df1da4-74bf-4474-a797-8f36c2d2c09f",
           episodic_present: true,
           action_present: true,
           pass: true,
         },
         abort_path: {
-          event_id: "evt-abort-01",
-          action_id: "act-abort-01",
+          event_id: "2090fccf-bacc-43e4-b96a-6e8bf8b8e08c",
+          action_id: "96037599-1aaf-4857-8948-b085694ecd5c",
           constraint_violation_raised: true,
           episodic_present: false,
           action_present: false,
@@ -399,18 +423,21 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
     rto: {
       probe_type: "rto",
       status: "pass",
-      measured_value: 0.099,
+      measured_value: 3.874,
       unit: "seconds",
       details: {
         target_seconds: 10.0,
-        recovered_via_node: "crdb-usw2-a",
-        recovered_via_region: "us-west-2",
-        first_success_event_id: "evt-rto-01",
-        attempt_count: 4,
+        leaseholder_node: "crdb-use2-b",
+        leaseholder_region: "us-east-2",
+        recovered_via_node: "crdb-use1-a",
+        recovered_via_region: "us-east-1",
+        first_success_event_id: "bb39e381-5ed6-463f-a40f-af220021ef66",
+        failover_exercised: true,
+        kill_region_failed_attempts: 1,
+        attempt_count: 2,
         attempts: [
-          { node: "crdb-use1-a", region: "us-east-1", ok: false, elapsed_ms: 41.2, error: "OperationalError" },
-          { node: "crdb-use1-b", region: "us-east-1", ok: false, elapsed_ms: 39.8, error: "OperationalError" },
-          { node: "crdb-usw2-a", region: "us-west-2", ok: true, elapsed_ms: 18.1 },
+          { node: "crdb-use2-b", region: "us-east-2", ok: false, elapsed_ms: 2.2, error: "OperationalError" },
+          { node: "crdb-use1-a", region: "us-east-1", ok: true, elapsed_ms: 3871.4 },
         ],
       },
     },
@@ -420,8 +447,24 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
       measured_value: 0.0,
       unit: "rows_lost",
       details: {
-        rows_expected: 8,
-        rows_found: 8,
+        phase: "after_recovery",
+        rows_expected: 7,
+        rows_found: 7,
+        rows_content_checked: 7,
+        rows_missing: [],
+        rows_content_mismatched: [],
+      },
+    },
+    rpo_during_outage: {
+      probe_type: "rpo",
+      status: "pass",
+      measured_value: 0.0,
+      unit: "rows_lost",
+      details: {
+        phase: "during_outage",
+        rows_expected: 7,
+        rows_found: 7,
+        rows_content_checked: 7,
         rows_missing: [],
         rows_content_mismatched: [],
       },
@@ -433,14 +476,29 @@ export const PHASE_THREE_RESILIENCE_REPORT = {
     after_recovery: 9,
     expected: 9,
     region_down_detected: true,
-    region_down_detection_seconds: 4.63,
+    region_down_detection_seconds: 2.4,
     recovery_reached_full_liveness: true,
-    recovery_elapsed_seconds: 6.91,
+    recovery_elapsed_seconds: 3.34,
   },
   range_snapshot: {
-    before_kill: { ranges: 42, under_replicated: 0 },
-    during_outage: { ranges: 42, under_replicated: 11 },
-    after_recovery: { ranges: 42, under_replicated: 0 },
+    before_kill: {
+      table: "episodic_events",
+      range_count: 9,
+      leaseholder_region_counts: { "us-east-2": 9 },
+      replica_region_counts: { "us-east-1": 18, "us-east-2": 18, "us-west-2": 9 },
+    },
+    during_outage: {
+      table: "episodic_events",
+      range_count: 9,
+      leaseholder_region_counts: { "us-east-1": 7, "us-west-2": 2 },
+      replica_region_counts: { "us-east-1": 18, "us-east-2": 18, "us-west-2": 9 },
+    },
+    after_recovery: {
+      table: "episodic_events",
+      range_count: 9,
+      leaseholder_region_counts: { "us-east-1": 7, "us-west-2": 2 },
+      replica_region_counts: { "us-east-1": 18, "us-east-2": 18, "us-west-2": 9 },
+    },
   },
   overall: {
     pass: true,

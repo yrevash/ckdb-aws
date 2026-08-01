@@ -4,7 +4,9 @@ import { useState, type ReactNode } from "react";
 
 import { ErrorBoundary } from "@/components/error-boundary";
 import { Overview } from "@/components/views/overview";
-import { Placeholder } from "@/components/views/placeholder";
+import { Incident } from "@/components/views/incident";
+import { Resilience } from "@/components/views/resilience";
+import { Memory } from "@/components/views/memory";
 import { ThemeToggle } from "@/components/ui";
 import {
   IconIncident,
@@ -19,35 +21,16 @@ type NavEntry = {
   id: ViewId;
   label: string;
   glyph: ReactNode;
-  /** right-aligned mono meta (built views) or the "soon" pill (stubs). */
+  /** right-aligned mono meta. */
   meta?: string;
-  ready: boolean;
 };
 
 const NAV: NavEntry[] = [
-  { id: "overview", label: "Overview", glyph: <IconOverview className="nav-item__glyph" />, meta: "proven · pending", ready: true },
-  { id: "incident", label: "Incident", glyph: <IconIncident className="nav-item__glyph" />, ready: false },
-  { id: "resilience", label: "Resilience", glyph: <IconResilience className="nav-item__glyph" />, ready: false },
-  { id: "memory", label: "Memory & Retrieval", glyph: <IconMemory className="nav-item__glyph" />, ready: false },
+  { id: "overview", label: "Overview", glyph: <IconOverview className="nav-item__glyph" />, meta: "proven · pending" },
+  { id: "incident", label: "Incident", glyph: <IconIncident className="nav-item__glyph" />, meta: "live" },
+  { id: "resilience", label: "Resilience", glyph: <IconResilience className="nav-item__glyph" />, meta: "RPO 0 · RTO 3.9s" },
+  { id: "memory", label: "Memory & Retrieval", glyph: <IconMemory className="nav-item__glyph" />, meta: "recall@1 0.85" },
 ];
-
-const STUBS: Record<Exclude<ViewId, "overview">, { title: string; what: string; sources: string[] }> = {
-  incident: {
-    title: "Incident",
-    what: "The live investigation story: perceive → recall → reason → act → record, with the ranked recall candidates and the one-transaction envelope that show memory changed the action.",
-    sources: ["events.ts (SSE / replay)"],
-  },
-  resilience: {
-    title: "Resilience",
-    what: "The full failover proof: region topology with the killed region, leaseholder distribution before/during/after, and every probe in detail.",
-    sources: ["resilience.ts", "phase3-resilience"],
-  },
-  memory: {
-    title: "Memory & Retrieval",
-    what: "The evaluation insights in depth and the temporal-drift timeline — facts evolving, not overwriting, with the agent choosing the currently-valid fix.",
-    sources: ["evaluation.ts", "temporal-drift.ts"],
-  },
-};
 
 export function AppShell() {
   const [view, setView] = useState<ViewId>("overview");
@@ -79,11 +62,7 @@ export function AppShell() {
             >
               {item.glyph}
               <span>{item.label}</span>
-              {item.ready ? (
-                item.meta ? <span className="nav-item__meta">{item.meta}</span> : null
-              ) : (
-                <span className="nav-item__soon">soon</span>
-              )}
+              {item.meta ? <span className="nav-item__meta">{item.meta}</span> : null}
             </button>
           ))}
         </div>
@@ -97,13 +76,12 @@ export function AppShell() {
         <ErrorBoundary surface={active.label}>
           {view === "overview" ? (
             <Overview />
+          ) : view === "incident" ? (
+            <Incident />
+          ) : view === "resilience" ? (
+            <Resilience />
           ) : (
-            <Placeholder
-              glyph={active.glyph}
-              title={STUBS[view].title}
-              what={STUBS[view].what}
-              sources={STUBS[view].sources}
-            />
+            <Memory />
           )}
         </ErrorBoundary>
       </main>
