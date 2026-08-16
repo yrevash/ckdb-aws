@@ -40,7 +40,7 @@ Three tracks, all integrated and green under `scripts/verify_phase3.sh`:
   Before each kill, leaseholders for the probed tables are **pinned into the region we then kill**
   (verified via `SHOW RANGES`), so a genuine failover is exercised — the probe *fails* if no real
   lease handoff occurs. Measured: **RPO = 0 rows lost, content-verified during the outage**;
-  **RTO = 3.5–4.9s** (target <10s; one run included a real serialization-retry during handoff). The
+  **RTO = 3.1–4.9s** (target <10s; one run included a real serialization-retry during handoff). The
   earlier "0.045–0.099s" was a fake — it never killed a leaseholder. (`phase3-resilience.json`.)
 - **Track B — Bitemporal & temporal drift.** Facts evolve as transitions, not overwrites; 2 drift
   families where an old fix becomes wrong. Temporal-validity is now checked against an **independent**

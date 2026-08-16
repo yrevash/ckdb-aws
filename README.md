@@ -30,7 +30,7 @@ real operational data**, which is exactly what a memory-only store can't do.
 | Single-store one-transaction `remediate_and_record` | **Locally proven** (live serializable proof) |
 | Retrieval quality (real, with hard negatives) | **Measured** — recall@1 = 0.85, recall@10 = 1.0, nDCG@10 = 0.94 `[real-run: python -m postmortem_eval]` |
 | Agent decision quality (MTTR / wrong-actions) | **Pending real-agent run** — needs the real Bedrock agent. A competent memoryless baseline ties on the deterministic simulator, so **no "% faster" is claimed until the real agent runs** (Reality Charter R7) |
-| Multi-region RPO / RTO under a *real* region kill | **Measured** on a 9-node cluster with leaseholders pinned to the killed region — **RPO = 0** (content-verified during the outage), **RTO 3.5–4.9s** `[real-run: verify_phase3.sh]` |
+| Multi-region RPO / RTO under a *real* region kill | **Measured** on a 9-node cluster with leaseholders pinned to the killed region — **RPO = 0** (content-verified during the outage), **RTO 3.1–4.9s** `[real-run: verify_phase3.sh]` |
 | Bitemporal facts + temporal drift; audit/PITR/hardening | **Locally proven** (Phase 3 B/C) — integrated; `verify_phase3.sh` passes Tracks A + B + C |
 | Live Bedrock, ECS/Fargate, Lambda consolidation on real AWS, public demo URL | **Pending real AWS deployment** — not yet performed; see notes below |
 

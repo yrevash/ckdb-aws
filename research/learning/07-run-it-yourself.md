@@ -42,7 +42,7 @@ After `verify_phase2.sh`, open **`evaluation/reports/phase2.json`** (schema v2 �
   are explicitly *not* a performance claim.
 
 After `verify_phase3.sh`, open **`evaluation/reports/phase3-resilience.json`** — `probes.rpo` (0 rows
-lost, content-verified during the outage), `probes.rto` (**3.5–4.9s**, a real failover with leaseholders
+lost, content-verified during the outage), `probes.rto` (**3.1–4.9s**, a real failover with leaseholders
 pinned to the killed region), and `node_liveness` (9 → 6 → 9 across the kill).
 
 ## 4. See the console (the UI)

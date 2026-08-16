@@ -45,7 +45,7 @@ UI; and **claims that need the real model wait for the real model.** Then we mad
 | Retrieval nDCG@10 | — | **0.94** (measured) |
 | Cold baseline | hard-coded to fail | a **competent** memoryless baseline (it *ties* on the toy sim — the honest result) |
 | Learning curve | hard-coded tuple | removed (no fake trend) |
-| RTO under region kill | 0.009s (no real failover) | **3.5–4.9s** — leaseholders pinned into the *killed* region, real lease handoff, probe fails if no failover |
+| RTO under region kill | 0.009s (no real failover) | **3.1–4.9s** — leaseholders pinned into the *killed* region, real lease handoff, probe fails if no failover |
 | RPO | 0 (soft) | **0, content-verified *during* the outage** |
 | MTTR / wrong-actions / orders | −63.6% / 20→0 / 40 saved | **pending real-agent run** — not claimed until the real Bedrock agent runs |
 | UI telemetry | hard-coded literals | derived from real events; absent data shows `—` |

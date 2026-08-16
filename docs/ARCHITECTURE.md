@@ -106,7 +106,7 @@ These are the axes CockroachDB uniquely owns; the build exists to demonstrate th
    cross-region).
 3. **RPO=0 region survival.** Kill a database region live; memory + agent keep working, zero rows
    lost, automatic recovery. *Locally proven today* on the 9-node simulated multi-region cluster
-   (Phase 3 Track A, real failover: RPO=0 content-verified during the outage; RTO **3.5–4.9s** with
+   (Phase 3 Track A, real failover: RPO=0 content-verified during the outage; RTO **3.1–4.9s** with
    leaseholders pinned into the killed region so a genuine lease handoff occurs).
    The managed/self-hosted **AWS rehearsal and camera capture are pending** — the local proof
    establishes feasibility, not the final recording.

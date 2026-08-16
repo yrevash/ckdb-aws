@@ -49,7 +49,7 @@ transition) with the agent choosing the currently-valid fix.
 
 A clean left/top nav with 4 calm views (not one crowded page):
 1. **Overview** — the honest headline as elegant stat tiles: retrieval recall@1 0.85 · nDCG 0.94 ·
-   RPO 0 · RTO 3.5–4.9s · read-your-writes 0-lag · **MTTR: pending real agent**. A calm "what's proven
+   RPO 0 · RTO 3.1–4.9s · read-your-writes 0-lag · **MTTR: pending real agent**. A calm "what's proven
    vs pending" board. This replaces the cluttered dump.
 2. **Incident** — the live investigation story (source A).
 3. **Resilience** — the failover proof (source B).

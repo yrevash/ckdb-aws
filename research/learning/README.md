@@ -12,7 +12,7 @@ guide. Read it top to bottom, or jump to what you need.
 | 02 | [`02-core-concepts.md`](./02-core-concepts.md) | The vocabulary: agentic memory (episodic/semantic/procedural), the one-transaction wedge, vector search (C-SPANN), MCP, bitemporal facts, sleep-time consolidation, RPO/RTO. |
 | 03 | [`03-architecture-and-components.md`](./03-architecture-and-components.md) | The system architecture + a folder-by-folder tour (backend, db, simulator, evaluation, resilience, consolidation, web, infra) — what/how/why for each. |
 | 04 | [`04-how-it-works-end-to-end.md`](./04-how-it-works-end-to-end.md) | One incident's full lifecycle — alert → recall → act → record → overnight consolidation — mapped to the actual code. |
-| 05 | [`05-phases-and-proofs.md`](./05-phases-and-proofs.md) | What each phase delivered and the **real, honest** numbers (retrieval recall@1 = 0.85; RPO = 0 / RTO 3.5–4.9s under a *real* region kill; MTTR pending the real agent). |
+| 05 | [`05-phases-and-proofs.md`](./05-phases-and-proofs.md) | What each phase delivered and the **real, honest** numbers (retrieval recall@1 = 0.85; RPO = 0 / RTO 3.1–4.9s under a *real* region kill; MTTR pending the real agent). |
 | 06 | [`06-security.md`](./06-security.md) | The security posture in learnable terms — the guardrails, AWS hardening, and why "the model can't be trusted" shapes everything. |
 | 07 | [`07-run-it-yourself.md`](./07-run-it-yourself.md) | Hands-on: run the three verifiers and *see* the proofs, so you learn by doing. |
 | 08 | [`08-glossary.md`](./08-glossary.md) | Fast definitions of every term and acronym used in the project. |
