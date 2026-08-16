@@ -32,6 +32,12 @@ class ConsolidationInfrastructureSourceTests(unittest.TestCase):
         self.assertIn("CONSOLIDATION_EMBEDDING_MODEL_ID", self.stack)
         self.assertIn("RUNBOOK_REINFORCEMENTS_TO_ACTIVATE", self.stack)
 
+    def test_consolidation_follows_the_shared_egress_mode_subnets(self) -> None:
+        # audit B2: SharedStack owns the subnet type per crdb_egress_mode.
+        # Hardcoding PRIVATE_ISOLATED here breaks `crdb_egress_mode=public`.
+        self.assertIn("shared.compute_subnets", self.stack)
+        self.assertNotIn("SubnetType.PRIVATE_ISOLATED", self.stack)
+
     def test_credentials_are_scoped_to_consolidation(self) -> None:
         self.assertIn("CockroachConsolidatorSecret", self.shared)
         self.assertIn("ChangefeedWebhookSecret", self.shared)

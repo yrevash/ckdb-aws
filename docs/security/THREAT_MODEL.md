@@ -14,7 +14,7 @@ them **by capability**, not by exact filename or line.
 - **[enforced+tested]** — runs today against a live node / in local tests (Track C, or app-layer logic
   exercised by `verify_phase2.sh`/`verify_phase3.sh`).
 - **[deploy-time]** — designed and locally exercised through the `fake` runtime, but only becomes real on
-  the live AWS/CockroachDB-Cloud deployment (pending Aug 1).
+  the live AWS/CockroachDB-Cloud deployment (pending).
 - **[planned]** — designed, not yet implemented anywhere (a named follow-up).
 
 ---
@@ -114,7 +114,7 @@ keep a subverted Z1 from becoming a production disaster.
 | **The agent (behaving correctly)** | Semi-trusted | Privileged but scoped; every action provenance-cited and audited. |
 | **The agent (confused / hallucinating)** | Semi-trusted, unreliable | *Not malicious but wrong* — the buggy-write case PITR exists for (HARDENING §4.1). |
 | **The compromised agent (adversary-controlled via prompt injection)** | **Hostile, inside Z1** | The primary adversary of this model. Assume the LLM will emit whatever the injected text wants; contain by removing standing authority, not by trusting the model. |
-| **External attacker (network)** | Hostile, outside | Targets exposed DB/console/webhook; countered by PrivateLink/private subnets/WAF (T8). |
+| **External attacker (network)** | Hostile, outside | Targets exposed DB/console/webhook; countered by PrivateLink (default mode; see `01-*` for the opt-in relaxation)/private subnets/WAF (T8). |
 | **Malicious/negligent insider or supply-chain actor** | Hostile, elevated | Poisoned dependency, leaked cred, or config weakening; countered by supply-chain policy + admin-audit + least-privilege. |
 | **Compromised tenant** | Hostile, authorized-for-own-`org_id` | Tries to reach another tenant's data (T5/A6). |
 | **The consolidator job (subverted)** | Semi-trusted, batch | A poisoned episode could distill into a harmful runbook; countered by Guardrails-on-output + role scoping + human-approved-runbooks-only. |
@@ -155,7 +155,7 @@ mitigations with status. **Defense-in-depth is explicit** — no single row reli
 |--------|---------|----------------------|
 | Cross-tenant leakage: agent reads/writes another `org_id`'s data | **T5** | Recall queries prefix-scoped on `(org_id, agent_id)` — C-SPANN prefix is a *hard requirement*, a non-matching WHERE defeats the index rather than silently widening it (doc `04` §3.3); no broad `SELECT *`; RBAC **[reader role enforced+tested; per-org row scoping is app+schema-layer, §01/§02 — deploy-time]** |
 | Secret leakage via logs, repo, or the changefeed URI | **T4** | No secrets in source/env/logs/URIs — Secrets Manager only (R2) **[deploy-time]**; CockroachDB redacts literal values `‹...›` in audit logs by default (HARDENING §3.4) **[enforced+tested]**; dependency/secret scanning in CI **[planned, §6 of governance doc]** |
-| Data exfiltration via unconstrained egress | T5, T8 | Network egress control, private subnets, PrivateLink so DB traffic never touches public internet **[deploy-time]**; S3 Block Public Access + SSE-KMS **[deploy-time]** |
+| Data exfiltration via unconstrained egress | T5, T8 | Network egress control, private subnets, PrivateLink so DB traffic never touches public internet **[deploy-time]**; S3 Block Public Access + SSE-KMS **[deploy-time]**; the opt-in `crdb_egress_mode=public` mode adds a NAT egress path for CockroachDB Cloud tiers without PrivateLink — an accepted, documented residual risk compensated by TLS `verify-full`, a Cloud IP allowlist, SG egress limited to 26257/443, and no inbound to compute **[opt-in, non-default]** |
 | PII/secrets bleeding from incident text into the model or memory | T4, T5 | Bedrock Guardrails **sensitive-information filters** on input and output **[deploy-time]**; data minimization — large blobs in S3, only references in rows **[deploy-time]** |
 
 ### D — Denial of service
@@ -173,7 +173,7 @@ mitigations with status. **Defense-in-depth is explicit** — no single row reli
 | **Prompt injection → destructive action** (the flagship scenario) | **T1** | Layered, no single point: (1) Guardrails prompt-attack + denied-topics screening **[deploy-time]**; (2) **structured tool I/O + allowlisted tools** — free text can never *become* a tool call **[deploy-time/§02]**; (3) **provenance gate** — action with no cited retrieved memory is rejected before execution (R4) **[deploy-time/§02, design proven via bitemporal/provenance locally]**; (4) **human-approval gate** for high-blast-radius (R5) **[deploy-time/§02]**; (5) **the writer role structurally cannot issue DROP/TRUNCATE/mass-DELETE** — the wedge that holds even if 1–4 are bypassed (R3) **[enforced+tested]** |
 | Over-privileged credential enables lateral movement | **T2** | One least-privilege role per compute unit (IAM) **[deploy-time]** *and* per DB identity (reader/writer/consolidator SQL grants, no shared "god role", no `*:*`, no wildcard write resource — R1) **[SQL layer enforced+tested]** |
 | Agent's writer role widened over time to serve unrelated features (e.g., eval instrumentation) | T2 | Explicit design rule: new write needs (consolidator, eval probes) get their **own** scoped identity, never a broadening of `postmortem_writer` (HARDENING §6 follow-ups) **[planned/policy]** |
-| Public exposure of DB / console / data | **T8** | PrivateLink to CockroachDB, private subnets, WAF on console, auth on console, no public S3 **[deploy-time]** |
+| Public exposure of DB / console / data | **T8** | PrivateLink to CockroachDB (default mode; see `01-*` for the opt-in relaxation), private subnets, WAF on console, auth on console, no public S3 **[deploy-time]** |
 | Supply-chain compromise elevates within the build | **T6** | Pinned deps + lockfiles, minimal base images, image + dependency scanning, provenance, PR review (governance §6) **[partially enforced (lockfiles) / planned (scanning gates)]** |
 
 ---

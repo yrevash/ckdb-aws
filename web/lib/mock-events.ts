@@ -1,6 +1,8 @@
 import type { ConsoleEvent } from "@/lib/events";
 
-const responder = { id: "responder-01", region: "us-east" } as const;
+// The cluster's PRIMARY REGION (db/bootstrap/010_multiregion.sql). Audit C2:
+// this fixture used to say "us-east", a spelling the real cluster never emits.
+const responder = { id: "responder-01", region: "us-east-1" } as const;
 
 export const PHASE_TWO_EVENTS: readonly ConsoleEvent[] = [
   {
@@ -186,7 +188,9 @@ export const PHASE_TWO_EVENTS: readonly ConsoleEvent[] = [
       memoryKind: "episodic",
       summary: "Rollback #5120 → #5119 committed with action act-5120-rollback",
       freshnessMs: 40,
-      recalledBy: { id: "responder-02", region: "eu-west" },
+      // Audit C2: a real surviving region of the demo cluster; "eu-west" exists
+      // nowhere in the real topology. Label rename only — no measured value moves.
+      recalledBy: { id: "responder-02", region: "us-west-2" },
       staleReadsObserved: 0,
     },
   },

@@ -1,0 +1,27 @@
+-- Postmortem POST-migration cluster settings: CHANGEFEED capability group
+-- (CockroachDB v25.3+).
+--
+-- Run by db/apply.sh AFTER the migration chain, as a cluster administrator
+-- (local dev `root`, or a one-time Cloud admin session), because:
+--   * these are CLUSTER SETTINGs, which must NOT live in the app migration
+--     chain (the migration identity has no MODIFYCLUSTERSETTING privilege, and
+--     db/tests/test_migrations.py enforces that invariant), and
+--   * apply.sh's post-migration slot is where every admin-only setting lands.
+--
+-- ONE CAPABILITY GROUP PER FILE (audit B3): `cockroach sql --file` stops at the
+-- first error in non-interactive mode, so a refusal here would have silently
+-- dropped every later statement in the same file. Splitting the old combined
+-- post-migration settings file into this one plus 091_audit_settings.sql is
+-- what makes the two groups fail independently -- a managed CockroachDB Cloud
+-- tier that permits rangefeeds but withholds the audit-logging settings in
+-- 091_audit_settings.sql still gets rangefeeds, and vice versa.
+-- If a managed tier refuses this file, apply.sh reports
+-- `CAPABILITY LOST: changefeeds (kv.rangefeed.enabled)` and (with
+-- POSTMORTEM_BOOTSTRAP_STRICT=0) continues instead of killing the schema apply.
+-- See docs/HARDENING.md.
+
+-- Changefeeds (the sleep-time consolidation pipeline: CockroachDB changefeed ->
+-- webhook/SQS -> Lambda) require rangefeeds. Fresh v26.2 nodes ship with this
+-- disabled; without it, CREATE CHANGEFEED fails. Flagged by the Track C
+-- Agent-Skills review (docs/HARDENING.md).
+SET CLUSTER SETTING kv.rangefeed.enabled = true;

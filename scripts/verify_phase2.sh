@@ -43,7 +43,15 @@ docker compose --project-directory "$ROOT_DIR" run --rm db-migrate
 (
   cd "$ROOT_DIR/infra"
   .venv/bin/pytest -q
-  .venv/bin/python app.py
+  # Both egress modes must synthesize. The context is supplied here because the
+  # app now fails fast on a deploy it knows cannot work (audit B2/B4); it is
+  # deliberately NOT in cdk.json, which would restore the silent default. Note
+  # `python app.py` never sees cdk.json's context block -- that is merged by the
+  # CDK CLI and delivered as CDK_CONTEXT_JSON.
+  CDK_CONTEXT_JSON='{"agent_image_uri":"000000000000.dkr.ecr.us-east-1.amazonaws.com/postmortem-agent:test","crdb_egress_mode":"privatelink","crdb_privatelink_service_name":"com.amazonaws.vpce.us-east-1.vpce-svc-EXAMPLE"}' \
+    .venv/bin/python app.py
+  CDK_CONTEXT_JSON='{"agent_image_uri":"000000000000.dkr.ecr.us-east-1.amazonaws.com/postmortem-agent:test","crdb_egress_mode":"public"}' \
+    .venv/bin/python app.py
 )
 
 (

@@ -9,7 +9,6 @@ from aws_cdk import (
     aws_apigatewayv2 as apigwv2,
     aws_apigatewayv2_integrations as apigwv2_integrations,
     aws_cloudwatch as cloudwatch,
-    aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as event_targets,
     aws_iam as iam,
@@ -30,8 +29,10 @@ from .stacks import (
 class ConsolidationStack(Stack):
     """Changefeed → FIFO SQS → sleep-time procedural-memory consolidation.
 
-    Both Lambdas run in isolated subnets (no internet egress), the queues and
-    logs are CMK-encrypted and TLS-only, and the consolidator's Bedrock grant is
+    Both Lambdas run in SharedStack's compute subnets (isolated with no
+    internet egress by default; NAT-routed only under the opt-in
+    ``crdb_egress_mode=public`` -- audit B2), the queues and logs are
+    CMK-encrypted and TLS-only, and the consolidator's Bedrock grant is
     scoped to the exact distillation/embedding models plus the shared guardrail.
     """
 
@@ -53,9 +54,11 @@ class ConsolidationStack(Stack):
             or "us.anthropic.claude-3-5-haiku-20241022-v1:0"
         )
 
-        vpc_subnets = ec2.SubnetSelection(
-            subnet_type=ec2.SubnetType.PRIVATE_ISOLATED
-        )
+        # Both Lambdas follow SharedStack's mode-selected compute subnets
+        # (audit B2) -- PRIVATE_ISOLATED by default, PRIVATE_WITH_EGRESS only
+        # under the opt-in crdb_egress_mode=public. Hardcoding the subnet type
+        # here would fail synth in public mode ("no Isolated subnet groups").
+        vpc_subnets = shared.compute_subnets
 
         dead_letter_queue = sqs.Queue(
             self,

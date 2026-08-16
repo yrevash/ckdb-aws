@@ -13,22 +13,30 @@ real AWS account, recording the demo, and submitting** — plus a few security d
 
 ## A. Critical path to submission (must-do)
 
-### 1. Real AWS deployment (planned for Aug 1) — the big one
+### 1. Real AWS deployment — the big one
 The whole system runs locally on a **fake runtime** (no AWS creds). To go real:
 - [ ] **Provision CockroachDB Cloud** cluster on AWS (decision: cheap single-region for the app + a
   self-hosted 3-region cluster for the failover demo, vs. paid multi-region Advanced ~$260/day).
 - [ ] **Confirm Bedrock model access** in the chosen region — Claude **Sonnet 4.6** + **Haiku** +
   **Titan Text Embeddings V2** enabled.
 - [ ] **Deploy the CDK stacks** (`infra/`) — Shared (VPC/KMS/Secrets/Guardrail), App (Fargate + WAF),
-  Consolidation (SQS + Lambdas), Security (CloudTrail/GuardDuty/Config).
-- [ ] **Populate real secrets** in Secrets Manager (CockroachDB reader/writer/consolidator DSNs, the
-  changefeed HMAC secret).
+  Consolidation (SQS + Lambdas), Security (CloudTrail/GuardDuty/Config) — synth now requires
+  `-c agent_image_uri=...` and, in the default privatelink mode, `-c crdb_privatelink_service_name=...`;
+  it fails fast rather than deploying a service that never passes /healthz (audit B4) or a VPC with no
+  path to the database (audit B2).
+- [ ] **Populate real secrets** in Secrets Manager: the Managed-MCP reader token, and **three
+  distinct** CockroachDB DSNs (`postmortem_agent_reader`, `postmortem_agent_writer`, consolidator) —
+  the backend refuses to start if reader and writer are the same identity — plus the changefeed HMAC
+  secret.
 - [ ] **Wire the real Managed MCP** recall path (service account + keys) and the **CockroachDB
   PrivateLink** endpoint service. Smoke-test `langchain-cockroachdb` early (it's young — verify it
-  behaves).
+  behaves). PrivateLink is **Advanced-tier only**; on a lower tier deploy with
+  `-c crdb_egress_mode=public` and add a Cloud IP allowlist for the NAT address.
 - [ ] **Swap the fake runtime → real Bedrock/Strands/MCP/SQL** and run the full end-to-end flow live.
 - [ ] **Stand up the changefeed → API Gateway → SQS → Lambda** consolidation pipeline against the real
-  cluster (flip `kv.rangefeed.enabled`, already handled in bootstrap).
+  cluster (flip `kv.rangefeed.enabled`, already handled in bootstrap) — if the tier permits
+  `SET CLUSTER SETTING` at all; `db/apply.sh` now reports rather than aborts when it is refused
+  (audit B3).
 - [ ] **Get the public demo URL** (the console on Fargate behind the ALB/WAF, or a Vercel preview).
 
 ### 2. Record the <3-minute demo video
@@ -39,8 +47,8 @@ The whole system runs locally on a **fake runtime** (no AWS creds). To go real:
 - [ ] Upload to YouTube/Vimeo, public.
 
 ### 3. Devpost submission
-- [ ] **Make the GitHub repo public** (it's currently private) and confirm the **MIT license is visible**
-  in the repo's About section.
+- [x] **GitHub repo is public** — <https://github.com/yrevash/ckdb-aws>. Still confirm the **MIT
+  license is visible** in the repo's About section.
 - [ ] Submit: public repo URL, demo URL, video URL, the **CockroachDB tool-usage** + **AWS service**
   writeups (already in the README), and the architecture diagram.
 - [ ] Optional: submit feedback on the CockroachDB AI tools (we hit several real gaps worth reporting —
@@ -62,10 +70,15 @@ These are marked **[deploy-time]** / **[planned]** and become real at/after depl
 ---
 
 ## C. Small cleanups (quick, do before recording)
-- [ ] **Unify region names** — the console/storyboard say `us-east / us-west / eu-west`; the real
-  cluster uses `us-east-1 / us-east-2 / us-west-2`. Pick one and make them match.
-- [ ] Copy the generated `phase3-resilience.json` into `web/public/` for the live console (or wire the
-  real endpoint) so the Resilience tab shows real telemetry, not the replay fixture.
+- [x] **Region names unified** — the console/storyboard and the real cluster both use
+  `us-east-1 / us-east-2 / us-west-2`. `Region` in `web/lib/events.ts` is now an open `string` with
+  `CLUSTER_REGIONS` naming the demo topology; the backend's `console_region()` no longer truncates
+  (a truncated label mislabelled where the agent actually ran — charter R6).
+- [x] **Phase 2 evaluation report** — `web/public/phase2-evaluation.json` is a **generated build
+  artifact** (`scripts/verify_phase2.sh` writes it from a real `python -m postmortem_eval` run) and is
+  gitignored on purpose. Run the verifier before recording, or the Memory view shows em-dashes
+  (Reality Charter R6). Note `phase3-resilience.json` **is** committed — decide deliberately whether
+  both should be, and never hand-author either.
 
 ---
 

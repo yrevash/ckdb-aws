@@ -9,13 +9,13 @@ edges are.
 - **Bedrock and MCP are *faked* locally.** The real model calls (streaming, token limits, cost,
   throttling/429s) and the real Managed MCP + `langchain-cockroachdb` path have **never actually run.**
   This is the #1 technical risk — everything downstream of "the agent reasons" is untested against the
-  real services. (Resolved tomorrow, on the AWS deploy.)
+  real services. (Resolves on the AWS deploy — not yet performed.)
 - Because of that, the **agent's decision quality** (does memory actually make it resolve incidents
   better?) is **not yet measured** — see file 05. It needs the real agent.
 
 ## B. Reliability under failure (partly being fixed in the audit pass)
 - **Transaction retries:** the write path retries CockroachDB serialization errors (40001); the audit
-  found the **recall read path did not** — being fixed.
+  found the **recall read path did not** — fixed in the 2026-08-02 audit pass.
 - **Idempotency:** a duplicate remediation used to error instead of replaying — fixed in audit batch 1.
 - **Graceful degradation:** what happens when Bedrock is down, MCP is down, or a tool fails mid-action?
   There are no **circuit breakers / fallbacks** yet.
@@ -50,10 +50,12 @@ edges are.
 ## G. Security deploy-time items (from `docs/security/`)
 - Real secret values, live PrivateLink to CockroachDB, GuardDuty/Config account enablement, **CSP
   nonces** (tighten from `unsafe-inline`), **CIS 6.4** idle-session timeout, and scheduled S3 backups
-  (PITR is proven on `nodelocal://`, not yet on a schedule to S3).
+  (PITR is proven on `nodelocal://`, not yet on a schedule to S3), the CockroachDB-Cloud-tier
+  constraint on PrivateLink (the CDK now offers an opt-in NAT egress mode instead), and managed tiers
+  that refuse `SET CLUSTER SETTING` during schema apply.
 
 ## The honest one-liner
-The **core is real and proven locally**; the gaps are **real-integration (tomorrow), production
+The **core is real and proven locally**; the gaps are **real-integration (pending the AWS deploy), production
 hardening (retries/observability/CI), and scale numbers we haven't earned yet.** None are unknowns that
 threaten the design — they're the normal distance between a strong hackathon build and a shipped
 product. We track them here rather than pretend they're done.

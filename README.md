@@ -32,7 +32,7 @@ real operational data**, which is exactly what a memory-only store can't do.
 | Agent decision quality (MTTR / wrong-actions) | **Pending real-agent run** — needs the real Bedrock agent. A competent memoryless baseline ties on the deterministic simulator, so **no "% faster" is claimed until the real agent runs** (Reality Charter R7) |
 | Multi-region RPO / RTO under a *real* region kill | **Measured** on a 9-node cluster with leaseholders pinned to the killed region — **RPO = 0** (content-verified during the outage), **RTO 3.5–4.9s** `[real-run: verify_phase3.sh]` |
 | Bitemporal facts + temporal drift; audit/PITR/hardening | **Locally proven** (Phase 3 B/C) — integrated; `verify_phase3.sh` passes Tracks A + B + C |
-| Live Bedrock, ECS/Fargate, Lambda consolidation on real AWS, public demo URL | **Pending real AWS deployment (Aug 1)** — see notes below |
+| Live Bedrock, ECS/Fargate, Lambda consolidation on real AWS, public demo URL | **Pending real AWS deployment** — not yet performed; see notes below |
 
 > **What "pending AWS" means.** The AWS boundary (Bedrock reasoning/embeddings, ECS/Fargate hosting,
 > the changefeed→SQS→Lambda consolidation pipeline, S3) is designed and locally exercised through a
@@ -48,7 +48,7 @@ Full diagram and data-flow narrative: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE
 flowchart TB
     SRE["On-call SRE"]
 
-    subgraph AWS["AWS (single-region compute) — PENDING live deploy Aug 1"]
+    subgraph AWS["AWS (single-region compute) — PENDING live deploy"]
         Console["Web Incident Console<br/>Next.js + shadcn, SSE"]
         Agent["Responder Agent<br/>Strands on ECS/Fargate<br/>perceive-recall-reason-act-record"]
         Bedrock["Amazon Bedrock<br/>Sonnet 4.6 + Haiku + Titan V2 + Guardrails"]
@@ -106,7 +106,7 @@ Postmortem uses **all four**:
 ## AWS services used & HOW
 
 The hackathon requires ≥1 AWS service with a writeup. Postmortem's design uses Bedrock + Lambda + S3 +
-ECS/Fargate (plus API Gateway, SQS, Secrets Manager, CloudWatch). **Live deployment is pending Aug 1**;
+ECS/Fargate (plus API Gateway, SQS, Secrets Manager, CloudWatch). **Live deployment is pending**;
 the roles below describe what each service does in the system.
 
 - **Amazon Bedrock (reasoning + embeddings)** — Claude **Sonnet 4.6** for the core perceive→reason→act
@@ -157,6 +157,17 @@ docker compose up -d cockroach
 docker compose run --rm db-migrate
 ```
 
+Applying the schema to a **managed CockroachDB Cloud cluster** whose SQL identity lacks
+`MODIFYCLUSTERSETTING` uses the bootstrap escape hatch instead:
+
+```bash
+POSTMORTEM_BOOTSTRAP_STRICT=0 DATABASE_URL='<cloud dsn>' db/apply.sh
+```
+
+`db/apply.sh` then names each capability it could not enable (`BOOTSTRAP_DEGRADED capability=[...]`)
+rather than failing the whole apply. The default is strict (`1`), which is what the compose files pin:
+on a local root cluster a refused `SET CLUSTER SETTING` is a real defect, not a tier limitation.
+
 Verify each phase (each verifier brings up the infrastructure it owns and runs that phase's suites):
 
 ```bash
@@ -185,13 +196,23 @@ Notes:
   also run standalone: `scripts/audit_check.sh`, `scripts/backup_pitr_smoke.sh`. Failover demo:
   `scripts/failover_demo.sh` (set `RESILIENCE_TEARDOWN=1` to auto-teardown). The remaining Phase 3
   item is **Track D** — the console UI surfaces for the resilience/temporal telemetry.
+- The AWS runtime requires **two distinct SQL identities**: `POSTMORTEM_READER_DATABASE_URL`
+  (`postmortem_agent_reader`) and `POSTMORTEM_WRITER_DATABASE_URL` (`postmortem_agent_writer`), plus
+  `POSTMORTEM_DATABASE_URL`. The backend **refuses to start** if the reader and writer DSNs are
+  identical or share a username — role separation that is only cosmetic is treated as a failure, not a
+  warning (audit C3). The CDK injects the two from **separate** Secrets Manager secrets.
+- The CDK chooses how compute reaches CockroachDB at synth time via the `crdb_egress_mode` context
+  flag: **`privatelink`** (default — no NAT, isolated subnets) or an opt-in **`public`** mode with NAT
+  egress, for CockroachDB Cloud tiers where PrivateLink is not offered. See
+  [`infra/README.md`](infra/README.md) and
+  [`docs/security/01-aws-infrastructure-security.md`](docs/security/01-aws-infrastructure-security.md).
 
 ## Demo
 
 A `<3-minute` screen-recorded walkthrough hits, in order: **memory changes the action** (Recall Thread
 to a 0.94-similar prior case) → **memory + action in one transaction** (the Transaction Envelope) →
 **live region kill with RPO=0** (the money shot) → **overnight consolidation** (raw cases distilled into
-the runbook the agent just used). The shot-by-shot recording script (ready to record Aug 1, with a
+the runbook the agent just used). The shot-by-shot recording script (ready to record, with a
 camera-safe deterministic-replay fallback) is in [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md); the UX
 rationale is in [`research/postmortem/06-demo-and-ux.md`](research/postmortem/06-demo-and-ux.md).
 

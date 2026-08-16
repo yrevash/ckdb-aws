@@ -13,7 +13,7 @@ runbook**, and the **honest compliance posture** for the hackathon.
 - `HARDENING.md` — the Track C controls proven live against CockroachDB v26.2.0.
 
 **Status convention** (per charter §8): **[enforced+tested]** runs today; **[deploy-time]** is real on the
-Aug 1 AWS deployment (locally exercised via the `fake` runtime); **[planned]** is a named follow-up.
+live AWS deployment (locally exercised via the `fake` runtime); **[planned]** is a named follow-up.
 Accuracy over hype — a control in a design doc is not an enforced control.
 
 ---
@@ -256,7 +256,7 @@ SLA-backed.
   denied-attempt capture, PITR proven end-to-end, and RPO=0 region survival proven on a 9-node simulated
   multi-region cluster. Identity is real at the SQL layer (reader/writer split, no `PUBLIC` schema CREATE).
   Data-protection and infrastructure-protection controls (KMS, Secrets Manager, PrivateLink, WAF) are
-  designed and locally exercised, activating on the Aug 1 deployment.
+  designed and locally exercised, activating on the live deployment.
 - **CIS — measurable progress, stated exactly.** CockroachDB Benchmark **6.3 (audit logging): PASS** (was
   FAIL before `0007_audit_logging.sql`). **6.4 (idle-session timeout): OPEN** — documented, not fixed.
   We surfaced and worked around two real skill-vs-v26.2 gaps (schema_locked vs `EXPERIMENTAL_AUDIT`;

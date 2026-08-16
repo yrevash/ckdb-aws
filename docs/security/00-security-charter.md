@@ -54,7 +54,7 @@ failure than a read-only chatbot. Security *is* the product's production-readine
 | T5 | **Data exfiltration / cross-tenant leakage** | Scoped queries by `org_id`, RBAC, network egress control, no broad SELECT |
 | T6 | **Supply-chain compromise** | Pinned deps + lockfiles, provenance, minimal base images, dependency scanning |
 | T7 | **Tampering with the audit trail** | Append-only + exportable audit logs, admin-audit, least-privilege on log config |
-| T8 | **Public exposure of DB / console / data** | PrivateLink to CockroachDB, private subnets, WAF on the console, no public S3, auth on the console |
+| T8 | **Public exposure of DB / console / data** | PrivateLink to CockroachDB (default; an opt-in NAT egress mode with an IP allowlist is documented in `01-*`), private subnets, WAF on the console, no public S3, auth on the console |
 
 ## 4. Non-negotiable rules (guardrails — enforce, don't just document)
 
@@ -104,7 +104,7 @@ failure than a read-only chatbot. Security *is* the product's production-readine
 
 - Keep `scripts/verify_phase2.sh` (and `verify_phase3.sh`) **green** — security is additive/hardening,
   not a regression. Add tests for new guardrail logic.
-- Mark every control **[implemented+tested]** vs **[deploy-time / pending real AWS Aug 1]** — accuracy
+- Mark every control **[implemented+tested]** vs **[deploy-time / pending real AWS]** — accuracy
   over claims. Do not claim a control is enforced if it only exists in a design doc.
 - Stay in your ownership lane; reuse existing venvs; for live-DB tests spin your own throwaway node on a
   unique port (do not touch the shared node).

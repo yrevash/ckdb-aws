@@ -187,6 +187,36 @@ Two layers, matching doc `04` §6.2:
   keeps the audit story's premise ("we know exactly who wrote what") from being undermined by an
   internet-reachable SQL port. Not exercised in this track (no live Cloud cluster provisioned for
   Phase 3) — flagged as a `03`/infra follow-up.
+  **Tier caveat:** CockroachDB Cloud PrivateLink is an **Advanced-tier** feature. On Standard/Basic
+  the equivalent posture is TLS `verify-full` plus a Cloud **IP allowlist** scoped to the
+  deployment's NAT egress address — which is what `infra/`'s opt-in `crdb_egress_mode=public`
+  provisions. Both paths are documented in
+  [`docs/security/01-aws-infrastructure-security.md`](security/01-aws-infrastructure-security.md);
+  the CDK default remains PrivateLink and refuses to synth without a real endpoint-service name.
+
+### 3.6 Managed-tier degradation (what is NOT in force when the cluster refuses the settings)
+
+Mechanisms 2 and 3 of §3.1 — role-based audit (`sql.log.user_audit`) and admin audit
+(`sql.log.admin_audit.enabled`) — are **cluster settings**, applied by `db/apply.sh` from
+`db/bootstrap/091_audit_settings.sql`. Managed CockroachDB Cloud tiers commonly withhold
+`MODIFYCLUSTERSETTING` from non-admin/serverless identities and will **refuse** them.
+
+The apply is fail-closed by default (`POSTMORTEM_BOOTSTRAP_STRICT=1`), so a refusal aborts and is
+impossible to miss. Run with `POSTMORTEM_BOOTSTRAP_STRICT=0` only on such a tier: the schema then
+applies, and `db/apply.sh` prints
+
+```
+BOOTSTRAP_DEGRADED capability=[role-based + admin SQL audit logging (sql.log.user_audit, sql.log.admin_audit.enabled)] ...
+```
+
+When that line appears, **mechanisms 2 and 3 of §3.1 are NOT in force on that cluster.** Only
+mechanism 1 — the table-level `EXPERIMENTAL_AUDIT` trail from `0007_audit_logging.sql` — remains,
+because it is a migration and always applies. Do not claim CIS 6.3 PASS, role-based audit, or admin
+audit on a cluster in that state; apply `db/bootstrap/091_audit_settings.sql` as a cluster
+administrator to restore them.
+
+`scripts/audit_check.sh` runs **strict** against a local root cluster, so its
+`sql.log.user_audit = 'postmortem_writer ALL'` assertion remains the live proof of §3.1.
 
 ---
 
@@ -290,13 +320,18 @@ Skills actually invoked in this session (not summarized from memory): `hardening
   provisioned for this track (Phase 3 Track C scope is local verification); whoever stands up the
   Advanced cluster (doc `04` §1) should apply the `CREATE SCHEDULE`, `log-export enable`, and
   PrivateLink steps as part of that provisioning, using this document as the checklist.
-- **Backend code changes are out of this track's file ownership.** The reader/writer grant model in
-  `0007_audit_logging.sql` is designed to match `backend/.env.example`'s existing
-  `COCKROACH_WRITER_DATABASE_URL` / `DATABASE_URL` split and doc `04` §4.2's two-service-account
-  model, but no backend code was touched. Whoever owns `backend/` should point
-  `postmortem_agent_reader`/`postmortem_agent_writer` credentials at the corresponding env vars
-  when wiring real Cloud/production connections (local dev's `root`-as-everything DSN in
-  `.env.example` is fine for now).
+  Note that on a managed tier the provisioning identity may be **refused** `SET CLUSTER SETTING`
+  outright — `feature.vector_index.enabled`, `kv.rangefeed.enabled`, `sql.log.user_audit` and
+  `sql.log.admin_audit.enabled` are all cluster settings the schema apply attempts. See
+  [`db/README.md`](../db/README.md) for what `db/apply.sh` does when a setting is refused and which
+  capabilities degrade (C-SPANN index creation, the consolidation changefeed, CIS 6.3 audit
+  logging).
+- **Resolved — backend wired.** The `postmortem_agent_reader` / `postmortem_agent_writer`
+  identities from `0007_audit_logging.sql` are consumed as `POSTMORTEM_READER_DATABASE_URL` /
+  `POSTMORTEM_WRITER_DATABASE_URL`; `runtime.py` fails closed with `RoleScopeViolation` when they are
+  identical or share a username (audit C3), and `infra/` injects them from two separate Secrets
+  Manager secrets. Local dev's `root`-as-everything DSN in `.env.example` remains fine for the
+  `fake` runtime only.
 
 ---
 

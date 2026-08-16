@@ -68,7 +68,7 @@ describe("IncidentView", () => {
 
     expect(text).toContain("ep-9217");
     expect(text).toContain("responder-02");
-    expect(text).toContain("eu-west");
+    expect(text).toContain("us-west-2");
   });
 
   it("shows a calm empty state when no incident is on the stream", () => {
@@ -85,7 +85,7 @@ describe("IncidentView", () => {
         sequence: 1,
         occurredAt: "2026-07-30T03:01:00.000Z",
         caseId: "CASE-9",
-        agent: { id: "responder-01", region: "us-east" },
+        agent: { id: "responder-01", region: "us-east-1" },
         type: "incident",
         payload: {
           service: "orders-api",

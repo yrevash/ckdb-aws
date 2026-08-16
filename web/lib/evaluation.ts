@@ -43,7 +43,9 @@ export function evaluationEventFromReport(
     sequence: Number.MAX_SAFE_INTEGER,
     occurredAt: report.generated_at,
     caseId,
-    agent: { id: "evaluation-harness", region: "us-east" },
+    // the primary region the harness runs against (db/bootstrap/010_multiregion.sql
+    // PRIMARY REGION; matches POSTMORTEM_AWS_REGION's default in backend config.py)
+    agent: { id: "evaluation-harness", region: "us-east-1" },
     type: "evaluation",
     payload: {
       seed: report.seed,

@@ -31,6 +31,11 @@ services:
     entrypoint: ["/bin/sh", "/workspace/db/apply.sh"]
     environment:
       DATABASE_URL: postgresql://root@cockroach:26257/defaultdb?sslmode=disable
+      # audit B3 -- local root cluster: a refused SET CLUSTER SETTING is a real
+      # defect here, so keep the schema apply fail-closed. Only a managed
+      # CockroachDB Cloud tier that withholds MODIFYCLUSTERSETTING should run
+      # with 0 (db/apply.sh then names each lost capability instead of aborting).
+      POSTMORTEM_BOOTSTRAP_STRICT: "1"
     volumes:
       - ./:/workspace:ro
 

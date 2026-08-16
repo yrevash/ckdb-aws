@@ -1,4 +1,22 @@
-export type Region = "us-east" | "us-west" | "eu-west";
+/**
+ * A cluster region label, spelled exactly the way the real cluster spells it:
+ * the `--locality=region=...` flags in docker-compose.multiregion.yml, the
+ * region names in db/bootstrap/010_multiregion.sql, and the strings in the
+ * generated evaluation/reports/phase3-resilience.json all say us-east-1 /
+ * us-east-2 / us-west-2. The old "us-east" | "us-west" | "eu-west" union was a
+ * console-only fiction no live component ever produced (audit C2).
+ *
+ * Deliberately open (`string`): the failover/leaseholder path renders whatever
+ * regions the live cluster reported, and the console must never rewrite a
+ * measured label into the closed set it happens to know about (charter R6).
+ * parseConsoleEvent already validates only `typeof region === "string"`, so
+ * this makes the type match what the boundary actually enforces.
+ */
+export type Region = string;
+
+/** The demo cluster's real topology — for fixtures and ordering only, never a
+ *  validation gate on live data. */
+export const CLUSTER_REGIONS = ["us-east-1", "us-east-2", "us-west-2"] as const;
 
 export type AgentIdentity = {
   id: string;

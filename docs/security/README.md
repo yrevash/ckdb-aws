@@ -8,7 +8,7 @@ real operational data**. Security is treated as core (the production-readiness s
    non-negotiable rules, data classification, compliance targets, ownership map. **Start here.**
 2. [`01-aws-infrastructure-security.md`](./01-aws-infrastructure-security.md) — IAM least-privilege,
    KMS, Secrets Manager, private VPC + PrivateLink, WAF, Bedrock Guardrails, CloudTrail/GuardDuty/Config
-   (CDK, 25 synth tests).
+   (CDK, synth-asserted in `infra/tests/`).
 3. [`02-agent-and-app-guardrails.md`](./02-agent-and-app-guardrails.md) — tool allowlist +
    human-approval gate, provenance gate (no ungrounded action), prompt-injection defenses, input
    validation + authenticated webhook, role-scoped DB access, web security headers.
@@ -30,5 +30,5 @@ citation committed in the same transaction. Defense in depth that does not trust
 ## Honesty
 
 Every control is tagged **implemented+tested** (runs in `scripts/verify_phase2.sh` today) vs
-**deploy-time** (needs the real AWS account, Aug 1) vs **planned**. No certification is claimed; the
+**deploy-time** (needs the real AWS account) vs **planned**. No certification is claimed; the
 posture is "AWS Well-Architected Security-Pillar aligned + CIS in progress," not audited.

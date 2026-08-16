@@ -11,7 +11,7 @@ console, and the system-under-management simulator, followed by a data-flow narr
 wedge proofs.
 
 > **Status honesty.** The diagram is the *target* deployment. What is **proven locally today** vs.
-> **pending real AWS deployment (Aug 1)** is marked throughout and summarized at the bottom. The
+> **pending real AWS deployment** is marked throughout and summarized at the bottom. The
 > managed-AWS boxes (Bedrock, Lambda, SQS, API Gateway, S3, ECS/Fargate) are designed and, where
 > local analogues exist, exercised locally — but they are **not yet deployed to a live AWS account**.
 
@@ -21,7 +21,7 @@ wedge proofs.
 flowchart TB
     SRE["On-call SRE"]
 
-    subgraph AWS["AWS (single-region compute) — PENDING live deploy Aug 1"]
+    subgraph AWS["AWS (single-region compute) — PENDING live deploy"]
         Console["Web Incident Console<br/>Next.js + shadcn, SSE<br/>(built locally today)"]
         Agent["Postmortem Responder Agent<br/>Strands loop on ECS/Fargate<br/>perceive - recall - reason - act - record"]
         Bedrock["Amazon Bedrock<br/>Claude Sonnet 4.6 (reason)<br/>Claude 3.5 Haiku (triage/distill)<br/>Titan Text Embeddings V2 (1024-d)<br/>+ Guardrails"]
@@ -85,6 +85,11 @@ flowchart TB
    Killing a database region does not lose data (RPO=0) and recovers automatically; the agent keeps
    recalling and acting against the surviving quorum. Compute lives in one region on purpose — RPO=0 is
    CockroachDB's property, not the compute tier's.
+   The compute tier reaches CockroachDB two ways, chosen at synth time: **PrivateLink** (default — no
+   NAT, isolated subnets, DB traffic never touches the internet) or an opt-in **public** egress mode
+   with NAT for CockroachDB Cloud tiers where PrivateLink is not offered. The CDK refuses to
+   synthesize a PrivateLink deployment without a real endpoint-service name rather than deploying a
+   VPC with no path to the database.
 
 ## The three wedge proofs
 
@@ -103,10 +108,10 @@ These are the axes CockroachDB uniquely owns; the build exists to demonstrate th
    lost, automatic recovery. *Locally proven today* on the 9-node simulated multi-region cluster
    (Phase 3 Track A, real failover: RPO=0 content-verified during the outage; RTO **3.5–4.9s** with
    leaseholders pinned into the killed region so a genuine lease handoff occurs).
-   The managed/self-hosted **AWS rehearsal and camera capture are pending Aug 1** — the local proof
+   The managed/self-hosted **AWS rehearsal and camera capture are pending** — the local proof
    establishes feasibility, not the final recording.
 
-## What is proven locally today vs. pending AWS (Aug 1)
+## What is proven locally today vs. pending AWS
 
 | Element | Status |
 |---|---|
@@ -115,8 +120,8 @@ These are the axes CockroachDB uniquely owns; the build exists to demonstrate th
 | Retrieval quality (real) | Measured (Phase 2 v2: recall@1=0.85 with hard negatives, nDCG@10=0.94) |
 | Agent MTTR delta | Pending real-agent run (no rigged number; Reality Charter R7) |
 | Multi-region RPO=0 / RTO<10s | Locally proven on 9-node simulated cluster (Phase 3 Track A) |
-| Bitemporal fact transitions + temporal-drift | Implemented + individually verified (Phase 3 Track B); integration into `verify_phase3.sh` pending |
-| Audit logging, PITR/backup, least-privilege roles | Implemented + individually verified (Phase 3 Track C); integration pending |
-| Bedrock (Sonnet/Haiku/Titan), Guardrails | Designed; boundary stubbed by `fake` runtime locally; **live Bedrock pending Aug 1** |
-| Changefeed → API GW → SQS → Lambda consolidation | Consolidation logic implemented + tested locally; **live AWS wiring pending Aug 1** |
-| ECS/Fargate hosting, S3, public demo URL | **Pending Aug 1** |
+| Bitemporal fact transitions + temporal-drift | Implemented + individually verified (Phase 3 Track B); integrated into `verify_phase3.sh` |
+| Audit logging, PITR/backup, least-privilege roles | Implemented + individually verified (Phase 3 Track C); integrated into `verify_phase3.sh` |
+| Bedrock (Sonnet/Haiku/Titan), Guardrails | Designed; boundary stubbed by `fake` runtime locally; **live Bedrock pending** |
+| Changefeed → API GW → SQS → Lambda consolidation | Consolidation logic implemented + tested locally; **live AWS wiring pending** |
+| ECS/Fargate hosting, S3, public demo URL | **Pending** |

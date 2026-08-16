@@ -15,7 +15,7 @@ guardrail (`02-*`) controls are referenced **by capability** — those docs own 
 - **IT** — *implemented + tested*: runs today against a live node or in the local test suites
   (`audit_check.sh`, `backup_pitr_smoke.sh`, `verify_phase2/3.sh`).
 - **DT** — *deploy-time*: designed and locally exercised via the `fake` runtime; becomes real on the live
-  AWS / CockroachDB-Cloud deployment (pending Aug 1).
+  AWS / CockroachDB-Cloud deployment (pending).
 - **PL** — *planned*: designed, a named follow-up, not yet implemented anywhere.
 
 **Enforced-at:** IAM · SQL (CockroachDB grants/settings) · APP (backend/agent code) · INFRA (CDK/network/
@@ -74,7 +74,8 @@ Bedrock/AWS) · PROC (process/policy).
 
 | Control | What it does | Enforced-at | Status | WA-Sec | CIS | NIST | EU AI Act | SOC 2 |
 |---|---|---|---|---|---|---|---|---|
-| PrivateLink from VPC to CockroachDB Cloud; DB traffic never on public internet | Removes internet-reachable SQL port | INFRA | **DT** (doc `03` §4; doc `04` §6) | IP | AWS-NET | PR.AC / PR.PT | Art. 15 | CC6 |
+| PrivateLink from VPC to CockroachDB Cloud; DB traffic never on public internet; synth refuses a PrivateLink deployment with no endpoint-service name (audit B2). Opt-in `crdb_egress_mode=public` documented in `01-*` | Removes internet-reachable SQL port | INFRA | **IT** (synth fail-closed) + **DT** (real endpoint-service name) | IP | AWS-NET | PR.AC / PR.PT | Art. 15 | CC6 |
+| Two distinct SQL service-account DSNs delivered as two separate Secrets Manager secrets; startup fails closed on identical/same-principal DSNs | Makes reader/writer separation structural, not cosmetic | INFRA + APP | **IT** (CDK synth test + `backend/tests/test_runtime.py`) / **DT** (real DSN values) | IAM | AWS-IAM | PR.AC | Art. 15 | CC6 |
 | Private subnets + security groups (deny-by-default) for compute | Blast-radius containment; no default ingress | INFRA | **DT** (doc `03` §4) | IP | AWS-NET | PR.AC | Art. 15 | CC6 |
 | WAF + throttle on the changefeed API Gateway / console | Filters malicious/abusive requests | INFRA | **DT** (doc `03` §1.2, §4) | IP | AWS-NET | PR.PT / DE.CM | Art. 15 | CC7 |
 | S3 Block Public Access + versioning | No public data; recoverable objects | INFRA | **DT** (doc `03` §1.2) | IP/DP | AWS-DP | PR.DS | Art. 15 | C1 |
@@ -85,11 +86,11 @@ Bedrock/AWS) · PROC (process/policy).
 | Control | What it does | Enforced-at | Status | WA-Sec | CIS | NIST | EU AI Act | SOC 2 |
 |---|---|---|---|---|---|---|---|---|
 | Table-level `EXPERIMENTAL_AUDIT` on the 5 agent-mutated tables → SENSITIVE_ACCESS channel | Every read+write to sensitive tables logged, tagged user+table | SQL | **IT** (HARDENING §3.1) | DET | **6.3** | DE.CM / PR.PT | **Art. 12** | CC7 |
-| Role-based audit (`sql.log.user_audit = 'postmortem_writer ALL'`) | Every statement by the mutating role logged cluster-wide | SQL | **IT** (HARDENING §3.1) | DET | **6.3** | DE.CM | **Art. 12** | CC7 |
-| Admin audit (`sql.log.admin_audit.enabled = true`) | Every schema/GRANT/cluster-setting change logged | SQL | **IT** (HARDENING §3.1) | DET | **6.3** | DE.CM | Art. 12 | CC7/CC8 |
+| Role-based audit (`sql.log.user_audit = 'postmortem_writer ALL'`) | Every statement by the mutating role logged cluster-wide | SQL | **IT** (HARDENING §3.1) (cluster setting via `db/bootstrap/091_audit_settings.sql`; on a managed tier that refuses it, apply.sh reports BOOTSTRAP_DEGRADED and this row is **not in force** — HARDENING §3.6) | DET | **6.3** | DE.CM | **Art. 12** | CC7 |
+| Admin audit (`sql.log.admin_audit.enabled = true`) | Every schema/GRANT/cluster-setting change logged | SQL | **IT** (HARDENING §3.1) (cluster setting via `db/bootstrap/091_audit_settings.sql`; on a managed tier that refuses it, apply.sh reports BOOTSTRAP_DEGRADED and this row is **not in force** — HARDENING §3.6) | DET | **6.3** | DE.CM | Art. 12 | CC7/CC8 |
 | Denied attempts audited (privilege-violation `42501` lands in the log) | "Did someone probe outside their lane" signal | SQL | **IT** (HARDENING §3.4) | DET | 6.x | DE.AE / DE.CM | Art. 12 | CC7 |
 | Attribution to actual principal (`postmortem_agent_writer`), not just role | Non-repudiation of who wrote what | SQL | **IT** (HARDENING §3.4) | DET | 6.x | PR.PT | Art. 12 | CC7 |
-| CIS 6.3 (audit-logging controls) | Baseline FAIL → PASS after `0007_audit_logging.sql` | SQL | **IT** (HARDENING §5) | DET | **6.3 PASS** | DE.CM | Art. 12 | CC7 |
+| CIS 6.3 (audit-logging controls) | Baseline FAIL → PASS after `0007_audit_logging.sql` | SQL | **IT** (HARDENING §5) (cluster setting via `db/bootstrap/091_audit_settings.sql`; on a managed tier that refuses it, apply.sh reports BOOTSTRAP_DEGRADED and this row is **not in force** — HARDENING §3.6) | DET | **6.3 PASS** | DE.CM | Art. 12 | CC7 |
 | Log export off ephemeral node disk to CloudWatch (SENSITIVE_ACCESS channel) | Durable, exportable audit evidence | INFRA | **DT** (HARDENING §3.5; doc `04` §6.2) | DET | 6.x | DE.CM / RS.AN | Art. 12 | CC7 |
 | Control-plane audit (`ccloud audit list`) | Who changed cluster config / service accounts | INFRA | **DT** (doc `04` §6.2) | DET | AWS-LOG | DE.CM | Art. 12 | CC7/CC8 |
 | CloudTrail / GuardDuty / AWS Config | Account-level detection & config compliance | INFRA | **DT** (charter §7; doc `03`) | DET | AWS-LOG | DE.CM | Art. 15 | CC7 |
@@ -132,5 +133,5 @@ Bedrock/AWS) · PROC (process/policy).
 **Bottom line:** the controls that are **IT** today are the CockroachDB-layer ones (RBAC split, three audit
 mechanisms, denied-attempt auditing, PITR, region survival) plus the one-transaction wedge and repo/SDLC
 hygiene. The **DT** controls are the AWS-boundary ones (encryption, Secrets Manager, PrivateLink, WAF,
-Guardrails, human-approval, log export) that come online with the Aug 1 deployment. Nothing AWS-side is
+Guardrails, human-approval, log export) that come online with the live deployment. Nothing AWS-side is
 claimed as done. See `03-governance-and-compliance.md` §8 for the full posture statement.
