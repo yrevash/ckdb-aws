@@ -24,7 +24,7 @@ Hackathon: **Build with Agentic Memory** (CockroachDB × AWS). Deliverable statu
 |---|---|---|
 | **Agentic Memory Design** | 3 memory types (episodic / semantic-bitemporal / procedural), C-SPANN recall, bitemporal "facts evolve, not overwrite" | Locally proven (Phase 1/2); bitemporal individually verified (Phase 3 Track B) |
 | **Technical Implementation** | Single-store one-transaction `remediate_and_record`; real C-SPANN vectors; MCP read vs. direct-SQL write RBAC split | Locally proven — live serializable proof green (Phase 1/2) |
-| **Real-World Impact** | Retrieval quality (real) + MTTR delta | Measured: recall@1=0.85 (hard negatives), nDCG@10=0.94. **MTTR delta pending the real-agent run** — no rigged number claimed (Reality Charter R7) |
+| **Real-World Impact** | Retrieval quality (real) + MTTR delta | Measured: recall@1=0.85 (hard negatives), nDCG@10=0.94. **MTTR delta still pending a credentialed run** — the A/B harness now exists and is tested (`postmortem_eval.real_agent`: same model both arms, memory the only variable, paired MTTR), but no rigged number is claimed until it runs against real Bedrock (Reality Charter R7) |
 | **Production Readiness** | RPO=0 / RTO<10s live region survival; audit logging; PITR/backup; least-privilege roles; Guardrails; observability | RPO=0/RTO locally proven on 9-node sim cluster (Track A); audit/PITR/roles individually verified (Track C); Bedrock Guardrails + AWS observability **pending-AWS** |
 | **Creativity & Originality** | Sleep-time consolidation (changefeed→SQS→Lambda distills raw incidents into runbooks) + bitemporal runbook evolution | Consolidation logic tested locally; live pipeline **pending-AWS** |
 
@@ -51,10 +51,24 @@ Hackathon: **Build with Agentic Memory** (CockroachDB × AWS). Deliverable statu
    share a username (audit C3). On a managed tier that withholds `MODIFYCLUSTERSETTING`, apply the
    schema with `POSTMORTEM_BOOTSTRAP_STRICT=0` and treat the printed `BOOTSTRAP_DEGRADED` lines as the
    tier's capability report (see [`db/README.md`](../db/README.md)).
-3. Bring up the public demo URL and test it end to end (including CSP/fonts/assets).
-4. Record the <3-min video per [`docs/DEMO_SCRIPT.md`](DEMO_SCRIPT.md), capturing a **real** region
+3. Run the real-agent decision-quality measurement — the last unmeasured claim in the project:
+
+   ```sh
+   PYTHONPATH=simulator:evaluation python3 -m postmortem_eval.real_agent \
+     --output evaluation/reports/decision-quality.json
+   PYTHONPATH=simulator:evaluation python3 -m postmortem_eval \
+     --decision-quality evaluation/reports/decision-quality.json \
+     --output evaluation/reports/phase2.json
+   ```
+
+   Needs AWS credentials plus Bedrock access to the reasoning model — **no VPC and no deployed
+   stack**, so it can be done against local CockroachDB well before the CDK deploy. Until it runs,
+   `decision_quality` correctly publishes `pending_real_agent_run`; see
+   [`evaluation/README.md`](../evaluation/README.md) for what the number does and does not claim.
+4. Bring up the public demo URL and test it end to end (including CSP/fonts/assets).
+5. Record the <3-min video per [`docs/DEMO_SCRIPT.md`](DEMO_SCRIPT.md), capturing a **real** region
    kill off-camera for the money shot.
-5. Complete and submit the Devpost form with buffer before the deadline (the repo is already public).
+6. Complete and submit the Devpost form with buffer before the deadline (the repo is already public).
 
 ## Pre-submission integration note
 
@@ -62,6 +76,8 @@ Phase 3 Tracks A/B/C are stitched into one verifier: `scripts/verify_phase3.sh` 
 recorded green — with a real `docker compose kill us-east-2` — in
 [`docs/SESSION_2026-08-02.md`](SESSION_2026-08-02.md). The earlier "not yet stitched / one known
 failing test" note in [`docs/SESSION_2026-07-31.md`](SESSION_2026-07-31.md) §4 is superseded by that
-session and is kept only as a historical record. The remaining Phase 3 item is **Track D** (console UI
-surfaces for the resilience/temporal telemetry). Re-run the verifiers before recording; no status
-above is claimed from anything but a real run.
+session and is kept only as a historical record. **Track D (console UI surfaces for the
+resilience/temporal telemetry) is done** — `web/components/views/{resilience,incident,memory}.tsx`
+with passing tests, recorded in [`docs/SESSION_2026-07-31.md`](SESSION_2026-07-31.md) §"UPDATE".
+All four Phase 3 tracks are complete. Re-run the verifiers before recording; no status above is
+claimed from anything but a real run.

@@ -26,7 +26,22 @@ class ResponderDecision:
     token_proxy: int = 0
     abstained: bool = False
     authorized_memory_id: str | None = None
-    decision_seconds: int = 0
+    # Seconds spent deciding. Deterministic responders report the fixed
+    # non-informative 0 (see responders.DECISION_LATENCY_NOT_MEASURED); the
+    # real-agent responder reports measured wall-clock, hence float.
+    decision_seconds: float = 0
+
+    # Populated only by a real model-backed responder (real_agent.py). The
+    # deterministic arms leave these at zero and report ``token_proxy``
+    # instead -- a proxy is not a token count and the two must never be
+    # compared or summed (Reality Charter R1/R9).
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model_id: str | None = None
+    # Set when the model returned a plan the simulator could not execute at
+    # all (unknown action type, missing required param). A real decision
+    # -quality signal, not a harness error.
+    invalid_plan: bool = False
 
 
 class Responder(Protocol):

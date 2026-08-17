@@ -88,11 +88,20 @@ class EvaluationHarness:
         oracle_path: Path | str | None = None,
         corpus_path: Path | str = FIXTURE_ROOT / "memory_corpus.json",
         retrieval_k: int = 10,
+        decision_quality_path: Path | str | None = None,
     ) -> None:
         self.scenario_path = scenario_path
         self.oracle_path = oracle_path
         self.corpus_path = Path(corpus_path)
         self.retrieval_k = retrieval_k
+        # Optional path to a report produced by ``postmortem_eval.real_agent``.
+        # Absent -> decision quality stays `pending_real_agent_run`. Present ->
+        # the measured block is embedded and tagged with the file it came from,
+        # so a reader can always tell which run produced the number and this
+        # harness never synthesises one itself.
+        self.decision_quality_path = (
+            Path(decision_quality_path) if decision_quality_path else None
+        )
         corpus = json.loads(self.corpus_path.read_text())
         self.gold_by_family: dict[str, set[str]] = {}
         self.hard_negative_ids: set[str] = set()
@@ -476,7 +485,17 @@ class EvaluationHarness:
         simulator + replay plumbing is deterministic and that a competent
         baseline (not a handicapped one) reaches resolution on the same stream.
         No improvement figure is emitted from them.
+
+        The one exception: if a real-agent report produced by
+        ``postmortem_eval.real_agent`` was supplied, its measured block is
+        embedded here verbatim alongside the same mechanism check. The figure
+        is never computed in this method -- it is only ever carried across
+        from a run that actually called the model.
         """
+
+        measured = self._load_measured_decision_quality()
+        if measured is not None:
+            return measured
 
         return {
             "status": "pending_real_agent_run",
@@ -525,6 +544,48 @@ class EvaluationHarness:
                 },
             },
         }
+
+    def _load_measured_decision_quality(self) -> dict[str, Any] | None:
+        """Carry across a real-agent report, if one was supplied.
+
+        Deliberately strict: a missing file is an error rather than a silent
+        fall back to the pending stub, because a verifier that asked for the
+        measured number and quietly published "pending" instead would be the
+        exact failure the Reality Charter exists to prevent. A malformed or
+        non-``measured`` report is rejected for the same reason.
+        """
+
+        if self.decision_quality_path is None:
+            return None
+
+        path = self.decision_quality_path
+        if not path.exists():
+            raise FileNotFoundError(
+                f"decision-quality report not found: {path}. Produce it with "
+                "`python -m postmortem_eval.real_agent --output <path>` (needs "
+                "AWS credentials and Bedrock access), or omit the argument to "
+                "publish decision quality as pending_real_agent_run."
+            )
+
+        report = json.loads(path.read_text())
+        if report.get("status") != "measured":
+            raise ValueError(
+                f"{path} is not a measured real-agent report "
+                f"(status={report.get('status')!r})."
+            )
+
+        block = dict(report["decision_quality"])
+        block.update(
+            {
+                "status": "measured",
+                "measured": True,
+                "produced_by": report.get("produced_by"),
+                "source_report": str(path),
+                "method": report.get("method"),
+                "arms": report.get("arms"),
+            }
+        )
+        return block
 
     def _summarize(self, results: list[IncidentResult]) -> dict[str, Any]:
         mttr = [item.mttr_seconds for item in results]

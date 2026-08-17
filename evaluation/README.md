@@ -49,12 +49,72 @@ PYTHONPATH=simulator:evaluation python3 -m postmortem_eval \
 python3 -m unittest discover -s evaluation/tests -v
 ```
 
+## Measuring decision quality for real (`real_agent.py`)
+
+`postmortem_eval.real_agent` is the harness that answers the one question the
+deterministic run cannot: **does retrieved memory make the agent better?** It
+replays the identical incident stream twice through the real Bedrock model —
+once with the top-k retrieved memories in context, once without — and scores
+the difference. It needs AWS credentials and Bedrock model access; nothing else
+in this directory does.
+
+```sh
+PYTHONPATH=simulator:evaluation python3 -m postmortem_eval.real_agent \
+  --region us-east-1 \
+  --output evaluation/reports/decision-quality.json
+
+# then fold the measured block into the main scorecard
+PYTHONPATH=simulator:evaluation python3 -m postmortem_eval \
+  --decision-quality evaluation/reports/decision-quality.json \
+  --output evaluation/reports/phase2.json
+```
+
+**The controlled variable is exactly one thing: memory in context.** Both arms
+use the same model, the same system prompt, the same action schema, the same
+service/dependency catalog, the same temperature, and the same scenario stream
+in the same order. The baseline is not handicapped — it is the same model with
+the same freedom to abstain, missing only the institutional memory of prior
+incidents. So the supported claim is precise:
+
+> Given retrieval measured at the recall@1 this report publishes, putting those
+> retrieved memories in the agent's context changes its decisions by *X*.
+
+Not "our vector search is good" (that is the `retrieval` section) and not
+"Claude is good" (both arms are Claude).
+
+Three properties worth knowing before quoting the number:
+
+- **MTTR is compared pairwise**, over incidents *both* arms resolved. Incidents
+  only one arm resolved are reported separately as a resolution-rate delta
+  rather than averaged away — otherwise an arm that only fixes the easy
+  incidents would look fast. Neither figure means anything without the other,
+  so both are always emitted, and when no shared resolved set exists the
+  reduction is emitted as `null` rather than fabricated.
+- **Model latency is included in MTTR and also reported separately**
+  (`mttr_reduction_percent_excluding_model_latency`), so a memory-heavier
+  prompt can never be mistaken for slower remediation.
+- **Retrieval is the harness's text ranker, not production C-SPANN.** That is
+  deliberate — it keeps the MTTR figure comparable to the recall@1/nDCG@10 in
+  the same report — and it is tagged as such in `method.retriever`.
+
+Abstention is a correct answer, not a forfeit: the `F10_NOVEL` oracle *requires*
+`no_op_page_human`, so an arm that pages a human on a genuinely novel incident
+resolves it and an arm that guesses does not. Unresolved incidents, unexecutable
+plans, and unparseable output are all recorded as outcomes rather than raised —
+a real agent failing is the measurement, not a harness bug.
+
 ## Interpretation
 
 Retrieval and temporal-validity numbers are real properties of the ranker and
 may be cited directly, tagged with the producing script. The deterministic MTTR,
 token and order figures under `decision_quality.mechanism_check` are simulator
 plumbing values for regression only and must **never** be presented as a
-performance comparison or an MTTR-improvement headline. Backend integration can
-implement the `Responder` protocol and reuse the same harness with the real
-agent to populate the pending decision-quality metrics.
+performance comparison or an MTTR-improvement headline.
+
+`decision_quality` reports `status: "pending_real_agent_run"` until a real
+`real_agent.py` report is supplied via `--decision-quality`. That switch cannot
+be flipped any other way: the loader refuses a missing file and refuses a report
+that is not itself tagged `measured`, so a verifier that asked for the number
+can never silently publish "pending" instead. `evaluation/tests/test_real_agent.py`
+doubles the Bedrock client to prove the harness is fair, leak-free and
+crash-proof — it never produces a decision-quality figure (Reality Charter R8).
