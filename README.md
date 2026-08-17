@@ -219,7 +219,8 @@ rationale is in [`research/postmortem/06-demo-and-ux.md`](research/postmortem/06
 ## Submission
 
 Devpost deliverable status and the judging-criteria coverage map:
-[`docs/SUBMISSION_CHECKLIST.md`](docs/SUBMISSION_CHECKLIST.md).
+[`docs/SUBMISSION_CHECKLIST.md`](docs/SUBMISSION_CHECKLIST.md). What is still outstanding, with the
+exact commands and known failure modes: [`docs/REMAINING.md`](docs/REMAINING.md).
 
 ## License
 

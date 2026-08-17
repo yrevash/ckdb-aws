@@ -1,5 +1,9 @@
 # Postmortem — Devpost Submission Checklist
 
+> **Working on the run-up to submission?** [`REMAINING.md`](REMAINING.md) is the actionable version
+> of this file — the blocking four, exact commands, known failure modes, and what to re-verify before
+> recording. This file is the deliverable/criteria status table.
+
 Hackathon: **Build with Agentic Memory** (CockroachDB × AWS). Deliverable status uses three states:
 **done** · **pending-AWS** (needs the live AWS deployment, not yet performed) · **pending-record**
 (needs the video capture, not yet recorded). Accuracy over hype — nothing below claims live AWS is done.
@@ -54,17 +58,21 @@ Hackathon: **Build with Agentic Memory** (CockroachDB × AWS). Deliverable statu
 3. Run the real-agent decision-quality measurement — the last unmeasured claim in the project:
 
    ```sh
-   PYTHONPATH=simulator:evaluation python3 -m postmortem_eval.real_agent \
+   export AWS_PROFILE=<profile> AWS_REGION=us-east-1     # after `aws configure` / `aws sso login`
+   PYTHONPATH=simulator:evaluation backend/.venv/bin/python -m postmortem_eval.real_agent \
      --output evaluation/reports/decision-quality.json
    PYTHONPATH=simulator:evaluation python3 -m postmortem_eval \
      --decision-quality evaluation/reports/decision-quality.json \
      --output evaluation/reports/phase2.json
    ```
 
-   Needs AWS credentials plus Bedrock access to the reasoning model — **no VPC and no deployed
-   stack**, so it can be done against local CockroachDB well before the CDK deploy. Until it runs,
-   `decision_quality` correctly publishes `pending_real_agent_run`; see
-   [`evaluation/README.md`](../evaluation/README.md) for what the number does and does not claim.
+   Use `backend/.venv/bin/python` for the first command — it is the only step in the repo that
+   needs `boto3`, and a bare `python3` fails with `ModuleNotFoundError`. Needs AWS credentials plus
+   Bedrock access to the reasoning model — **no VPC and no deployed stack**, so it can be done
+   against local CockroachDB well before the CDK deploy. Run the one-call smoke test in
+   [`evaluation/README.md`](../evaluation/README.md) first; it catches missing model access and a
+   non-US region in ~2s instead of 40 incidents in. Until it runs, `decision_quality` correctly
+   publishes `pending_real_agent_run`.
 4. Bring up the public demo URL and test it end to end (including CSP/fonts/assets).
 5. Record the <3-min video per [`docs/DEMO_SCRIPT.md`](DEMO_SCRIPT.md), capturing a **real** region
    kill off-camera for the money shot.

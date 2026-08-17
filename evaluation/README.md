@@ -55,19 +55,45 @@ python3 -m unittest discover -s evaluation/tests -v
 deterministic run cannot: **does retrieved memory make the agent better?** It
 replays the identical incident stream twice through the real Bedrock model —
 once with the top-k retrieved memories in context, once without — and scores
-the difference. It needs AWS credentials and Bedrock model access; nothing else
-in this directory does.
+the difference.
+
+**This is the one thing here that needs an interpreter with `boto3` and live
+AWS credentials.** Everything else in this directory runs on a bare system
+`python3`. Use the backend virtualenv, which already has `boto3`:
 
 ```sh
-PYTHONPATH=simulator:evaluation python3 -m postmortem_eval.real_agent \
-  --region us-east-1 \
+# 1. authenticate (interactive — do this yourself, once per session)
+aws configure                     # or: aws sso login --profile <profile>
+export AWS_PROFILE=<profile> AWS_REGION=us-east-1
+
+# 2. one-call smoke test BEFORE the full run — confirms credentials, region
+#    and Bedrock model access in ~2s instead of failing 40 incidents deep
+backend/.venv/bin/python -c "import boto3; c=boto3.client('bedrock-runtime'); \
+r=c.converse(modelId='us.anthropic.claude-sonnet-4-6', \
+messages=[{'role':'user','content':[{'text':'reply with OK'}]}], \
+inferenceConfig={'maxTokens':16}); \
+print(r['output']['message']['content'][0]['text'], r['usage'])"
+
+# 3. the real run (~58 Converse calls)
+PYTHONPATH=simulator:evaluation backend/.venv/bin/python -m postmortem_eval.real_agent \
   --output evaluation/reports/decision-quality.json
 
-# then fold the measured block into the main scorecard
+# 4. fold the measured block into the main scorecard (system python3 is fine)
 PYTHONPATH=simulator:evaluation python3 -m postmortem_eval \
   --decision-quality evaluation/reports/decision-quality.json \
   --output evaluation/reports/phase2.json
 ```
+
+Two things fail *after* the run starts if they are not right, which is what the
+smoke test in step 2 exists to catch:
+
+- **Bedrock model access** to `us.anthropic.claude-sonnet-4-6` is request-gated
+  per model in the Bedrock console. A fresh account does not have it.
+- **`us.anthropic.*` is the US cross-region inference profile**, so `AWS_REGION`
+  must be a US region. Point it elsewhere and every call fails.
+
+Override the model with `--model-id` (it defaults to
+`POSTMORTEM_REASONING_MODEL_ID`, matching what the backend actually ships).
 
 **The controlled variable is exactly one thing: memory in context.** Both arms
 use the same model, the same system prompt, the same action schema, the same
